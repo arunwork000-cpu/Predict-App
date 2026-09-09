@@ -1,0 +1,29 @@
+{% extends "base.html" %}
+{% block title %}Leaderboard{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">Leaderboard</h1>
+{% if profiles %}
+  <div class="table-responsive">
+    <table class="table table-striped bg-white">
+      <thead>
+        <tr>
+          <th scope="col">Rank</th>
+          <th scope="col">Player</th>
+          <th scope="col">Points</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for profile in profiles %}
+          <tr {% if user.is_authenticated and profile.user_id == user.id %}class="table-warning"{% endif %}>
+            <td>{{ forloop.counter }}</td>
+            <td>{{ profile.user.username }}</td>
+            <td>{{ profile.points }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <p class="text-muted">No players yet. Register to appear on the board.</p>
+{% endif %}
+{% endblock %}
