@@ -1,0 +1,70 @@
+{% extends "base.html" %}
+{% block title %}My Predictions{% endblock %}
+{% block content %}
+<h1 class="h3 mb-2">My Predictions</h1>
+<p class="text-muted">Your picks. Points shown once the result is entered: correct +10, incorrect −5.</p>
+
+<h2 class="h5 mt-4">Pending</h2>
+{% if pending %}
+  <div class="table-responsive mb-4">
+    <table class="table bg-white align-middle">
+      <thead>
+        <tr>
+          <th scope="col">Match</th>
+          <th scope="col">Your pick</th>
+          <th scope="col">Kickoff</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in pending %}
+          <tr>
+            <td>{{ p.match.team_a }} vs {{ p.match.team_b }}</td>
+            <td>{{ p.choice_name }}</td>
+            <td class="small text-muted">{{ p.match.start_time }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <p class="text-muted">No pending predictions. Go to <a href="{% url 'match_list' %}">Matches</a> to make one.</p>
+{% endif %}
+
+<h2 class="h5 mt-4">Decided</h2>
+{% if decided %}
+  <div class="table-responsive">
+    <table class="table table-striped bg-white align-middle">
+      <thead>
+        <tr>
+          <th scope="col">Match</th>
+          <th scope="col">Your pick</th>
+          <th scope="col">Result</th>
+          <th scope="col">Outcome</th>
+          <th scope="col">Points</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in decided %}
+          <tr>
+            <td>{{ p.match.team_a }} vs {{ p.match.team_b }}</td>
+            <td>{{ p.choice_name }}</td>
+            <td>{{ p.match.winner_name }}</td>
+            <td>
+              {% if p.is_correct %}
+                <span class="badge text-bg-success">Hit</span>
+              {% else %}
+                <span class="badge text-bg-danger">Miss</span>
+              {% endif %}
+            </td>
+            <td>
+              {% if p.points_earned > 0 %}+{{ p.points_earned }}{% else %}{{ p.points_earned }}{% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <p class="text-muted">No decided predictions yet.</p>
+{% endif %}
+{% endblock %}

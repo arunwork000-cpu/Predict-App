@@ -77,6 +77,29 @@ def predict(request, pk):
     )
 
 
+@login_required
+def my_predictions(request):
+    predictions = (
+        Prediction.objects.filter(user=request.user)
+        .select_related(
+            "match",
+            "match__sport",
+            "match__team_a",
+            "match__team_b",
+            "match__winner",
+        )
+    )
+    pending = [p for p in predictions if not p.match.is_scored]
+    decided = [p for p in predictions if p.match.is_scored]
+    pending.sort(key=lambda p: p.match.start_time)
+    decided.sort(key=lambda p: p.match.start_time, reverse=True)
+    return render(
+        request,
+        "predictions/my_predictions.html",
+        {"pending": pending, "decided": decided},
+    )
+
+
 def leaderboard(request):
     profiles = Profile.objects.select_related("user").order_by(
         "-points", "user__username"

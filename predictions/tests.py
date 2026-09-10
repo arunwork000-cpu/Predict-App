@@ -340,6 +340,101 @@ class TeamModelTests(TestCase):
             self.football.delete()
 
 
+class MyPredictionsViewTests(TestCase):
+    def setUp(self):
+        self.alice = User.objects.create_user("alice", password="pass12345")
+        self.bob = User.objects.create_user("bob", password="pass12345")
+        self.url = reverse("my_predictions")
+
+    def _match(self, label):
+        sport = Sport.objects.create(name=f"Sport {label}")
+        return future_match(
+            sport=sport,
+            team_a=Team.objects.create(name=f"A {label}", sport=sport),
+            team_b=Team.objects.create(name=f"B {label}", sport=sport),
+        )
+
+    def _score(self, match, winning_side):
+        match.winner = match.team_a if winning_side == "A" else match.team_b
+        match.save()
+        self.assertTrue(score_match(match.pk))
+        match.refresh_from_db()
+
+    def test_login_is_required(self):
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response.url)
+
+    def test_user_sees_only_their_own_predictions(self):
+        mine = self._match("mine")
+        theirs = self._match("theirs")
+        Prediction.objects.create(user=self.alice, match=mine, choice="A")
+        Prediction.objects.create(user=self.bob, match=theirs, choice="A")
+
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+
+        shown = list(response.context["pending"]) + list(response.context["decided"])
+        self.assertEqual([p.match_id for p in shown], [mine.id])
+        self.assertContains(response, "A mine")
+        self.assertNotContains(response, "A theirs")
+
+    def test_correct_prediction_shows_hit_and_plus_ten(self):
+        match = self._match("hit")
+        Prediction.objects.create(user=self.alice, match=match, choice="A")
+        self._score(match, "A")
+
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+
+        decided = response.context["decided"]
+        self.assertEqual(len(decided), 1)
+        self.assertIs(decided[0].is_correct, True)
+        self.assertEqual(decided[0].points_earned, POINTS_CORRECT)
+        self.assertContains(response, "Hit")
+        self.assertContains(response, "+10")
+
+    def test_incorrect_prediction_shows_miss_and_minus_five(self):
+        match = self._match("miss")
+        Prediction.objects.create(user=self.alice, match=match, choice="A")
+        self._score(match, "B")
+
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+
+        decided = response.context["decided"]
+        self.assertEqual(len(decided), 1)
+        self.assertIs(decided[0].is_correct, False)
+        self.assertEqual(decided[0].points_earned, POINTS_WRONG)
+        self.assertContains(response, "Miss")
+        self.assertContains(response, "-5")
+
+    def test_pending_and_decided_are_separated(self):
+        pending_match = self._match("pending")
+        decided_match = self._match("decided")
+        Prediction.objects.create(user=self.alice, match=pending_match, choice="A")
+        Prediction.objects.create(user=self.alice, match=decided_match, choice="A")
+        self._score(decided_match, "A")
+
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+
+        self.assertEqual(
+            [p.match_id for p in response.context["pending"]], [pending_match.id]
+        )
+        self.assertEqual(
+            [p.match_id for p in response.context["decided"]], [decided_match.id]
+        )
+
+    def test_empty_state_for_user_with_no_predictions(self):
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+        self.assertEqual(response.context["pending"], [])
+        self.assertEqual(response.context["decided"], [])
+        self.assertContains(response, "No pending predictions")
+        self.assertContains(response, "No decided predictions yet")
+
+
 class MatchAdminActionTests(TestCase):
     def setUp(self):
         User.objects.create_superuser("root", "root@example.com", "pass12345")

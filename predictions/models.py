@@ -194,3 +194,32 @@ class Prediction(models.Model):
         if self.choice == self.Side.B:
             return str(self.match.team_b)
         return self.choice
+
+    @property
+    def is_decided(self):
+        """True once the match has been scored (a result exists)."""
+        return self.match.is_scored
+
+    @property
+    def is_correct(self):
+        """True/False once the match is decided, else None."""
+        if not self.match.is_scored:
+            return None
+        return self.choice == self.match.winning_side()
+
+    @property
+    def points_earned(self):
+        """Points this pick is worth, or None until the match is decided.
+
+        Read-only view of the scoring rules in predictions.services; it does
+        not run scoring or touch any stored total.
+        """
+        if not self.match.is_scored:
+            return None
+        from .services import POINTS_CORRECT, POINTS_WRONG
+
+        return (
+            POINTS_CORRECT
+            if self.choice == self.match.winning_side()
+            else POINTS_WRONG
+        )
