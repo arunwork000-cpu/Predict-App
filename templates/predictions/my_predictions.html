@@ -67,4 +67,31 @@
 {% else %}
   <p class="text-muted">No decided predictions yet.</p>
 {% endif %}
+
+{% if cancelled %}
+  <h2 class="h5 mt-4">Cancelled</h2>
+  <p class="text-muted">These matches were cancelled. No points were awarded.</p>
+  <div class="table-responsive">
+    <table class="table bg-white align-middle">
+      <thead>
+        <tr>
+          <th scope="col">Match</th>
+          <th scope="col">Your pick</th>
+          <th scope="col">Status</th>
+          <th scope="col">Points</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for p in cancelled %}
+          <tr>
+            <td>{{ p.match.team_a }} vs {{ p.match.team_b }}</td>
+            <td>{{ p.choice_name }}</td>
+            <td><span class="badge text-bg-secondary">Cancelled</span></td>
+            <td>0</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endif %}
 {% endblock %}

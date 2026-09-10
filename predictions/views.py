@@ -123,14 +123,21 @@ def my_predictions(request):
             "match__winner",
         )
     )
-    pending = [p for p in predictions if not p.match.is_scored]
-    decided = [p for p in predictions if p.match.is_scored]
+    cancelled = [
+        p for p in predictions if p.match.status == Match.Status.CANCELLED
+    ]
+    active = [
+        p for p in predictions if p.match.status != Match.Status.CANCELLED
+    ]
+    pending = [p for p in active if not p.match.is_scored]
+    decided = [p for p in active if p.match.is_scored]
     pending.sort(key=lambda p: p.match.start_time)
     decided.sort(key=lambda p: p.match.start_time, reverse=True)
+    cancelled.sort(key=lambda p: p.match.start_time, reverse=True)
     return render(
         request,
         "predictions/my_predictions.html",
-        {"pending": pending, "decided": decided},
+        {"pending": pending, "decided": decided, "cancelled": cancelled},
     )
 
 

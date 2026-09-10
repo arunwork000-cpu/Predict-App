@@ -40,7 +40,10 @@
         <strong><a href="{% url 'match_detail' match.pk %}">{{ match.team_a }} vs {{ match.team_b }}</a></strong>
         <div class="small text-muted">Kickoff: {{ match.start_time }} · Deadline: {{ match.prediction_deadline }}</div>
         <div class="small mt-1">
-          {% if match.winner %}
+          {% if match.status == "cancelled" %}
+            <span class="badge text-bg-danger">Cancelled</span>
+            This match was cancelled &mdash; no result will be recorded.
+          {% elif match.winner %}
             Winner: <strong>{{ match.winner_name }}</strong>
             {% if match.is_scored %}<span class="badge text-bg-secondary">Scored</span>{% endif %}
           {% else %}
