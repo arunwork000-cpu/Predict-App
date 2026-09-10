@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.1/ref/settings/
 """
 
+import os
 from pathlib import Path
 
 import environ
@@ -117,12 +118,21 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # Database
 # https://docs.djangoproject.com/en/6.1/ref/settings/#databases
 
-DATABASES = {
-    'default': {
-        'ENGINE': 'django.db.backends.sqlite3',
-        'NAME': BASE_DIR / 'db.sqlite3',
+# SQLite is the default for local development. Set DATABASE_URL to point at
+# any other database in production, e.g.
+#   DATABASE_URL=postgres://USER:PASSWORD@HOST:PORT/NAME
+# which django-environ parses into ENGINE 'django.db.backends.postgresql'
+# plus NAME / USER / PASSWORD / HOST / PORT (the psycopg driver is used at
+# connection time). No connection is made while settings load.
+if 'DATABASE_URL' in os.environ:
+    DATABASES = {'default': env.db('DATABASE_URL')}
+else:
+    DATABASES = {
+        'default': {
+            'ENGINE': 'django.db.backends.sqlite3',
+            'NAME': BASE_DIR / 'db.sqlite3',
+        }
     }
-}
 
 
 # Password validation
