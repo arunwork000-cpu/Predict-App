@@ -135,6 +135,21 @@ class PredictViewTests(TestCase):
         self.assertIn("/accounts/login/", response.url)
         self.assertFalse(Prediction.objects.exists())
 
+    def test_predict_page_renders_for_open_match(self):
+        match = future_match()
+        response = self.client.get(reverse("predict", args=[match.pk]))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "predictions/predict.html")
+        self.assertContains(response, str(match.team_a))
+        self.assertContains(response, str(match.team_b))
+
+    def test_cancel_link_returns_to_match_detail(self):
+        match = future_match()
+        response = self.client.get(reverse("predict", args=[match.pk]))
+        detail_url = reverse("match_detail", args=[match.pk])
+        # Exact href match: the predict URL (.../predict/) cannot satisfy this.
+        self.assertContains(response, 'href="%s"' % detail_url)
+
 
 class AccountTests(TestCase):
     def test_register_creates_user_profile_and_logs_in(self):
