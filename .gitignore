@@ -2,3 +2,8 @@
 __pycache__/
 *.py[cod]
 *$py.class
+
+# Local environment, database and collected static files
+.env
+db.sqlite3
+/staticfiles/

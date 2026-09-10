@@ -12,22 +12,40 @@ https://docs.djangoproject.com/en/6.1/ref/settings/
 
 from pathlib import Path
 
+import environ
 from django.contrib.messages import constants as message_constants
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 
-# Quick-start development settings - unsuitable for production
-# See https://docs.djangoproject.com/en/6.1/howto/deployment/checklist/
-
-# SECURITY WARNING: keep the secret key used in production secret!
-SECRET_KEY = 'django-insecure-2vz=z*brk_jcl%+)jeh)5gu=grm*=zjcg!kr9pjk!l-_(q=myp'
+# Environment configuration (12-factor).
+# Local development works with no .env file: the defaults below are dev-safe.
+# Production supplies real values via the environment (or a .env file).
+# See .env.example for the full list of supported variables.
+env = environ.Env(
+    DEBUG=(bool, True),
+    ALLOWED_HOSTS=(list, ['localhost', '127.0.0.1']),
+)
+_env_file = BASE_DIR / '.env'
+if _env_file.exists():
+    env.read_env(_env_file)
 
 # SECURITY WARNING: don't run with debug turned on in production!
-DEBUG = True
+DEBUG = env('DEBUG')
 
-ALLOWED_HOSTS = []
+# SECURITY WARNING: keep the secret key used in production secret!
+# A throwaway key is fine for local development, but production (DEBUG=False)
+# must supply its own SECRET_KEY - it never falls back to a shared value.
+if DEBUG:
+    SECRET_KEY = env(
+        'SECRET_KEY',
+        default='django-insecure-dev-only-do-not-use-in-production',
+    )
+else:
+    SECRET_KEY = env('SECRET_KEY')
+
+ALLOWED_HOSTS = env('ALLOWED_HOSTS')
 
 
 # Application definition
