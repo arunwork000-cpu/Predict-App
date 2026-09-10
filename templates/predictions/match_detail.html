@@ -8,6 +8,8 @@
     <h1 class="h3 mb-0">{{ match.team_a }} vs {{ match.team_b }}</h1>
     {% if state == "open" %}
       <span class="badge text-bg-success">Open</span>
+    {% elif state == "live" %}
+      <span class="badge text-bg-warning">Live</span>
     {% elif state == "locked" %}
       <span class="badge text-bg-secondary">Locked</span>
     {% elif state == "completed" %}

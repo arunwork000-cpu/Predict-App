@@ -546,6 +546,32 @@ class MyPredictionsViewTests(TestCase):
         self.assertNotContains(response, "Hit")
         self.assertNotContains(response, "Miss")
 
+    def test_live_match_prediction_shows_live_badge_and_stays_pending(self):
+        match = self._match("live")
+        Prediction.objects.create(user=self.alice, match=match, choice="A")
+        match.status = Match.Status.LIVE
+        match.save()
+
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+
+        pending = list(response.context["pending"])
+        self.assertEqual([p.match_id for p in pending], [match.id])
+        self.assertNotIn(
+            match.id, [p.match_id for p in response.context["decided"]]
+        )
+        self.assertNotIn(
+            match.id, [p.match_id for p in response.context["cancelled"]]
+        )
+
+        prediction = pending[0]
+        self.assertIsNone(prediction.is_correct)
+        self.assertIsNone(prediction.points_earned)
+
+        self.assertContains(response, "Live")
+        self.assertNotContains(response, "Hit")
+        self.assertNotContains(response, "Miss")
+
     def test_empty_state_for_user_with_no_predictions(self):
         self.client.login(username="alice", password="pass12345")
         response = self.client.get(self.url)
@@ -620,6 +646,14 @@ class MatchDetailViewTests(TestCase):
         response = self.client.get(reverse("match_detail", args=[match.pk]))
         self.assertEqual(response.context["state"], "cancelled")
         self.assertContains(response, "Cancelled")
+        self.assertNotContains(response, reverse("predict", args=[match.pk]))
+
+    def test_live_match_shows_live_state(self):
+        match = self._match("live", status=Match.Status.LIVE)
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertEqual(response.context["state"], "live")
+        self.assertContains(response, "Live")
+        self.assertNotContains(response, "Locked")
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
     def test_completed_scored_match_shows_winner(self):
@@ -841,6 +875,16 @@ class MatchListViewTests(TestCase):
         self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
         self.assertContains(response, "Cancelled")
         self.assertContains(response, "no result will be recorded")
+        self.assertNotContains(response, "Winner not entered yet.")
+
+    def test_live_match_shows_live_status_not_awaiting_winner(self):
+        match = self._match("live-ui", status=Match.Status.LIVE)
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
+        self.assertContains(response, "Live")
+        self.assertContains(response, "in progress")
         self.assertNotContains(response, "Winner not entered yet.")
 
     def test_authenticated_user_sees_their_pick_and_change_label(self):

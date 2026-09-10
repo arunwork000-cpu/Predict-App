@@ -43,6 +43,9 @@
           {% if match.status == "cancelled" %}
             <span class="badge text-bg-danger">Cancelled</span>
             This match was cancelled &mdash; no result will be recorded.
+          {% elif match.status == "live" %}
+            <span class="badge text-bg-warning">Live</span>
+            This match is in progress. Predictions are closed.
           {% elif match.winner %}
             Winner: <strong>{{ match.winner_name }}</strong>
             {% if match.is_scored %}<span class="badge text-bg-secondary">Scored</span>{% endif %}

@@ -48,6 +48,8 @@ def match_detail(request, pk):
         state = "cancelled"
     elif match.winner_id:
         state = "completed"
+    elif match.status == Match.Status.LIVE:
+        state = "live"
     elif match.predictions_open:
         state = "open"
     else:

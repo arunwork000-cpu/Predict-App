@@ -18,7 +18,12 @@
       <tbody>
         {% for p in pending %}
           <tr>
-            <td>{{ p.match.team_a }} vs {{ p.match.team_b }}</td>
+            <td>
+              {{ p.match.team_a }} vs {{ p.match.team_b }}
+              {% if p.match.status == "live" %}
+                <span class="badge text-bg-warning">Live</span>
+              {% endif %}
+            </td>
             <td>{{ p.choice_name }}</td>
             <td class="small text-muted">{{ p.match.start_time }}</td>
           </tr>
