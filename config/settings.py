@@ -126,6 +126,12 @@ WSGI_APPLICATION = 'config.wsgi.application'
 # connection time). No connection is made while settings load.
 if 'DATABASE_URL' in os.environ:
     DATABASES = {'default': env.db('DATABASE_URL')}
+    # Reuse connections between requests in production. Both are
+    # environment-configurable (CONN_MAX_AGE in seconds; 0 disables reuse).
+    DATABASES['default']['CONN_MAX_AGE'] = env.int('CONN_MAX_AGE', default=60)
+    DATABASES['default']['CONN_HEALTH_CHECKS'] = env.bool(
+        'CONN_HEALTH_CHECKS', default=True
+    )
 else:
     DATABASES = {
         'default': {
