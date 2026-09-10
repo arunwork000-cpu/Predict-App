@@ -6,7 +6,7 @@ from django.core import mail
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.db.models import ProtectedError
-from django.test import TestCase
+from django.test import Client, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -307,6 +307,80 @@ class PasswordResetFlowTests(TestCase):
         response = self._request_reset(email="nobody@example.com")
         self.assertRedirects(response, reverse("password_reset_done"))
         self.assertEqual(len(mail.outbox), 0)
+
+
+class PasswordChangeFlowTests(TestCase):
+    OLD_PASSWORD = "oldpass12345"
+    NEW_PASSWORD = "StrongNewPass123"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "changeuser", password=self.OLD_PASSWORD
+        )
+
+    def _login(self):
+        self.client.login(username="changeuser", password=self.OLD_PASSWORD)
+
+    def _change(self, old, new):
+        return self.client.post(
+            reverse("password_change"),
+            {"old_password": old, "new_password1": new, "new_password2": new},
+        )
+
+    def test_anonymous_is_redirected_to_login(self):
+        response = self.client.get(reverse("password_change"))
+        self.assertEqual(response.status_code, 302)
+        self.assertIn("/accounts/login/", response.url)
+
+    def test_authenticated_page_renders_on_project_shell(self):
+        self._login()
+        response = self.client.get(reverse("password_change"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "registration/password_change_form.html")
+        self.assertTemplateUsed(response, "base.html")
+        self.assertContains(response, "Sports Predictions")
+        self.assertNotContains(response, 'id="content-main"')
+
+    def test_navbar_exposes_change_password_link(self):
+        self._login()
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, reverse("password_change"))
+        self.assertContains(response, "Change password")
+
+    def test_wrong_old_password_is_rejected(self):
+        self._login()
+        response = self._change("not-the-old-password", self.NEW_PASSWORD)
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(response.context["form"].errors)
+        self.user.refresh_from_db()
+        self.assertTrue(self.user.check_password(self.OLD_PASSWORD))
+
+    def test_successful_change_redirects_to_done_on_project_shell(self):
+        self._login()
+        response = self._change(self.OLD_PASSWORD, self.NEW_PASSWORD)
+        self.assertRedirects(response, reverse("password_change_done"))
+
+        done = self.client.get(reverse("password_change_done"))
+        self.assertEqual(done.status_code, 200)
+        self.assertTemplateUsed(done, "registration/password_change_done.html")
+        self.assertTemplateUsed(done, "base.html")
+        self.assertContains(done, "Sports Predictions")
+
+    def test_successful_change_keeps_session_and_swaps_password(self):
+        self._login()
+        self._change(self.OLD_PASSWORD, self.NEW_PASSWORD)
+
+        # Same client stays authenticated (update_session_auth_hash).
+        still_in = self.client.get(reverse("my_predictions"))
+        self.assertEqual(still_in.status_code, 200)
+
+        # New password works for a fresh session; old password does not.
+        self.assertTrue(
+            Client().login(username="changeuser", password=self.NEW_PASSWORD)
+        )
+        self.assertFalse(
+            Client().login(username="changeuser", password=self.OLD_PASSWORD)
+        )
 
 
 class PageTests(TestCase):
