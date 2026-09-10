@@ -549,6 +549,97 @@ class MatchDetailViewTests(TestCase):
         self.assertContains(response, reverse("match_detail", args=[match.pk]))
 
 
+class LeaderboardViewTests(TestCase):
+    """Hardening for templates/predictions/leaderboard.html + the leaderboard view."""
+
+    def _user(self, username, points=0):
+        user = User.objects.create_user(username, password="pass12345")
+        # A Profile is auto-created by the post_save signal; set its points.
+        Profile.objects.filter(user=user).update(points=points)
+        return user
+
+    @staticmethod
+    def _row_for(content, username):
+        """Return the <tr>...</tr> slice of the rendered table body for a username."""
+        body = content[content.index("<tbody>"):content.index("</tbody>")]
+        at = body.index(f"<td>{username}</td>")
+        start = body.rindex("<tr", 0, at)
+        stop = body.index("</tr>", at)
+        return body[start:stop]
+
+    def test_orders_by_points_highest_first_with_matching_ranks(self):
+        self._user("carol", points=30)
+        self._user("alice", points=10)
+        self._user("bob", points=-5)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        profiles = list(response.context["profiles"])
+        self.assertEqual(
+            [(p.user.username, p.points) for p in profiles],
+            [("carol", 30), ("alice", 10), ("bob", -5)],
+        )
+        content = response.content.decode()
+        self.assertLess(content.index("carol"), content.index("alice"))
+        self.assertLess(content.index("alice"), content.index("bob"))
+        self.assertIn("<td>1</td>", self._row_for(content, "carol"))
+        self.assertIn("<td>2</td>", self._row_for(content, "alice"))
+        self.assertIn("<td>3</td>", self._row_for(content, "bob"))
+
+    def test_ties_broken_by_username_ascending(self):
+        self._user("zoe", points=15)
+        self._user("amy", points=15)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        profiles = list(response.context["profiles"])
+        self.assertEqual([p.user.username for p in profiles], ["amy", "zoe"])
+        content = response.content.decode()
+        self.assertLess(content.index("amy"), content.index("zoe"))
+
+    def test_logged_in_user_row_is_highlighted(self):
+        self._user("alice", points=10)
+        self._user("bob", points=20)
+        self.client.login(username="alice", password="pass12345")
+
+        response = self.client.get(reverse("leaderboard"))
+        content = response.content.decode()
+
+        self.assertIn("table-warning", self._row_for(content, "alice"))
+        self.assertNotIn("table-warning", self._row_for(content, "bob"))
+
+    def test_anonymous_visitor_gets_no_highlighted_row(self):
+        self._user("alice", points=10)
+        self._user("bob", points=20)
+
+        response = self.client.get(reverse("leaderboard"))
+
+        self.assertNotContains(response, "table-warning")
+
+    def test_leaderboard_reflects_scored_predictions(self):
+        correct_user = User.objects.create_user("winner", password="pass12345")
+        wrong_user = User.objects.create_user("loser", password="pass12345")
+        match = future_match()
+        Prediction.objects.create(user=correct_user, match=match, choice="A")
+        Prediction.objects.create(user=wrong_user, match=match, choice="B")
+
+        match.winner = match.team_a
+        match.save()
+        self.assertTrue(score_match(match.pk))
+
+        response = self.client.get(reverse("leaderboard"))
+
+        profiles = list(response.context["profiles"])
+        self.assertEqual(
+            [(p.user.username, p.points) for p in profiles],
+            [("winner", POINTS_CORRECT), ("loser", POINTS_WRONG)],
+        )
+        content = response.content.decode()
+        self.assertLess(content.index("winner"), content.index("loser"))
+        self.assertIn(f"<td>{POINTS_CORRECT}</td>", self._row_for(content, "winner"))
+        self.assertIn(f"<td>{POINTS_WRONG}</td>", self._row_for(content, "loser"))
+
+
 class MatchAdminActionTests(TestCase):
     def setUp(self):
         User.objects.create_superuser("root", "root@example.com", "pass12345")
