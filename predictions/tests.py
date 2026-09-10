@@ -640,6 +640,107 @@ class LeaderboardViewTests(TestCase):
         self.assertIn(f"<td>{POINTS_WRONG}</td>", self._row_for(content, "loser"))
 
 
+class MatchListViewTests(TestCase):
+    """Hardening for the match_list view + templates/predictions/match_list.html."""
+
+    def _match(self, label, **kwargs):
+        sport = Sport.objects.create(name=f"Sport {label}")
+        return future_match(
+            sport=sport,
+            team_a=Team.objects.create(name=f"A {label}", sport=sport),
+            team_b=Team.objects.create(name=f"B {label}", sport=sport),
+            **kwargs,
+        )
+
+    def _past_deadline_kwargs(self):
+        now = timezone.now()
+        return {
+            "start_time": now - timedelta(minutes=5),
+            "prediction_deadline": now - timedelta(hours=1),
+        }
+
+    def test_published_match_is_visible_and_unpublished_is_not(self):
+        self._match("shown")
+        self._match("hidden", is_published=False)
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertContains(response, "A shown")
+        self.assertNotContains(response, "A hidden")
+
+    def test_future_match_is_open_past_deadline_match_is_closed(self):
+        open_match = self._match("open")
+        closed_match = self._match("closed", **self._past_deadline_kwargs())
+
+        response = self.client.get(reverse("match_list"))
+
+        open_ids = [m.id for m in response.context["open_matches"]]
+        closed_ids = [m.id for m in response.context["closed_matches"]]
+        self.assertIn(open_match.id, open_ids)
+        self.assertNotIn(open_match.id, closed_ids)
+        self.assertIn(closed_match.id, closed_ids)
+        self.assertNotIn(closed_match.id, open_ids)
+
+    def test_scored_match_shows_winner_and_scored_badge(self):
+        match = self._match("scored")
+        match.winner = match.team_a
+        match.save()
+        self.assertTrue(score_match(match.pk))
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
+        self.assertContains(response, "Winner:")
+        self.assertContains(response, str(match.team_a))
+        self.assertContains(response, "Scored")
+
+    def test_locked_match_without_winner_shows_awaiting_message_and_no_scored(self):
+        match = self._match("locked", **self._past_deadline_kwargs())
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
+        self.assertContains(response, "Predictions locked. Winner not entered yet.")
+        self.assertNotContains(response, "Scored")
+
+    def test_cancelled_match_is_closed_not_open(self):
+        # Documents current behaviour: a cancelled match drops out of "open"
+        # and lands in "closed" with no cancelled-specific label in the list.
+        match = self._match("cancelled", status=Match.Status.CANCELLED)
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertNotIn(match.id, [m.id for m in response.context["open_matches"]])
+        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
+
+    def test_authenticated_user_sees_their_pick_and_change_label(self):
+        match = self._match("pick")
+        user = User.objects.create_user("alice", password="pass12345")
+        Prediction.objects.create(user=user, match=match, choice="A")
+        self.client.login(username="alice", password="pass12345")
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertContains(response, "Your pick")
+        self.assertContains(response, "Change pick")
+
+    def test_guest_sees_login_to_predict_and_not_the_predict_link(self):
+        match = self._match("guest")
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertContains(response, "Log in to predict")
+        self.assertNotContains(response, reverse("predict", args=[match.pk]))
+
+    def test_closed_section_empty_state(self):
+        self._match("only-open")
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertEqual(response.context["closed_matches"], [])
+        self.assertContains(response, "No closed matches yet.")
+
+
 class MatchAdminActionTests(TestCase):
     def setUp(self):
         User.objects.create_superuser("root", "root@example.com", "pass12345")
