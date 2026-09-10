@@ -143,17 +143,6 @@ class Match(models.Model):
                 "The prediction deadline cannot be after kickoff."
             )
 
-        if self.pk:
-            original = Match.objects.filter(pk=self.pk).first()
-            if (
-                original
-                and original.is_scored
-                and original.winner_id != self.winner_id
-            ):
-                errors["winner"] = (
-                    "The winner cannot be changed after this match has been scored."
-                )
-
         if errors:
             raise ValidationError(errors)
 
@@ -174,6 +163,15 @@ class Prediction(models.Model):
         related_name="predictions",
     )
     choice = models.CharField(max_length=1, choices=Side.choices)
+    points_awarded = models.IntegerField(
+        null=True,
+        blank=True,
+        default=None,
+        help_text=(
+            "Points recorded for this pick when the match was scored. "
+            "None means the match has not been scored yet."
+        ),
+    )
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
@@ -209,11 +207,14 @@ class Prediction(models.Model):
 
     @property
     def points_earned(self):
-        """Points this pick is worth, or None until the match is decided.
+        """Points recorded for this pick, or None until the match is scored.
 
-        Read-only view of the scoring rules in predictions.services; it does
-        not run scoring or touch any stored total.
+        Once scoring has run this is the value stored on the row
+        (``points_awarded``). The rule-based fallback only covers rows that
+        were scored before ``points_awarded`` existed.
         """
+        if self.points_awarded is not None:
+            return self.points_awarded
         if not self.match.is_scored:
             return None
         from .services import POINTS_CORRECT, POINTS_WRONG

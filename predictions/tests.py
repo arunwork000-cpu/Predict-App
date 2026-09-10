@@ -1,15 +1,18 @@
 import re
 from datetime import timedelta
 
+from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import User
+from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core import mail
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.db.models import ProtectedError
-from django.test import Client, TestCase
+from django.test import Client, RequestFactory, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
+from .admin import MatchAdmin
 from .models import Match, Prediction, Profile, Sport, Team
 from .services import POINTS_CORRECT, POINTS_WRONG, score_match
 
@@ -48,41 +51,248 @@ class ScoringTests(TestCase):
         self.alice = User.objects.create_user("alice", password="pass12345")
         self.bob = User.objects.create_user("bob", password="pass12345")
         self.match = future_match()
+        # alice picks Team A, bob picks Team B.
         Prediction.objects.create(user=self.alice, match=self.match, choice="A")
         Prediction.objects.create(user=self.bob, match=self.match, choice="B")
 
-    def test_correct_and_incorrect_points(self):
-        self.match.winner = self.match.team_a
-        self.match.save()
-        self.assertTrue(score_match(self.match.pk))
-        self.alice.profile.refresh_from_db()
-        self.bob.profile.refresh_from_db()
+    def _set_winner(self, side):
         self.match.refresh_from_db()
-        self.assertEqual(self.alice.profile.points, POINTS_CORRECT)
-        self.assertEqual(self.bob.profile.points, POINTS_WRONG)
+        self.match.winner = (
+            self.match.team_a if side == "A" else self.match.team_b
+        )
+        self.match.save()
+
+    def _clear_winner(self):
+        self.match.refresh_from_db()
+        self.match.winner = None
+        self.match.save()
+
+    def _pred(self, user):
+        return Prediction.objects.get(user=user, match=self.match)
+
+    def _points(self, user):
+        user.profile.refresh_from_db()
+        return user.profile.points
+
+    # --- existing behaviour, still intact -------------------------------
+
+    def test_correct_and_incorrect_points(self):
+        self._set_winner("A")
+        self.assertTrue(score_match(self.match.pk))
+        self.match.refresh_from_db()
+        self.assertEqual(self._points(self.alice), POINTS_CORRECT)
+        self.assertEqual(self._points(self.bob), POINTS_WRONG)
         self.assertTrue(self.match.is_scored)
 
     def test_scoring_is_idempotent(self):
-        self.match.winner = self.match.team_a
-        self.match.save()
+        self._set_winner("A")
         self.assertTrue(score_match(self.match.pk))
         self.assertFalse(score_match(self.match.pk))
-        self.alice.profile.refresh_from_db()
-        self.assertEqual(self.alice.profile.points, POINTS_CORRECT)
+        self.assertEqual(self._points(self.alice), POINTS_CORRECT)
 
     def test_score_without_winner_does_nothing(self):
         self.assertFalse(score_match(self.match.pk))
-        self.alice.profile.refresh_from_db()
-        self.assertEqual(self.alice.profile.points, 0)
+        self.assertEqual(self._points(self.alice), 0)
 
-    def test_cannot_change_winner_after_scoring(self):
-        self.match.winner = self.match.team_a
-        self.match.save()
+    def test_user_without_a_prediction_is_not_affected(self):
+        carol = User.objects.create_user("carol", password="pass12345")
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self.assertEqual(self._points(carol), 0)
+
+    # --- points stored per prediction ---------------------------------
+
+    def test_unscored_prediction_has_no_points_awarded(self):
+        pred = self._pred(self.alice)
+        self.assertIsNone(pred.points_awarded)
+        self.assertIsNone(pred.points_earned)
+
+    def test_points_awarded_is_stored_after_initial_scoring(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        # alice picked the winner, bob did not.
+        self.assertEqual(self._pred(self.alice).points_awarded, POINTS_CORRECT)
+        self.assertEqual(self._pred(self.bob).points_awarded, POINTS_WRONG)
+        self.assertEqual(self._pred(self.alice).points_earned, POINTS_CORRECT)
+        self.assertEqual(self._pred(self.bob).points_earned, POINTS_WRONG)
+
+    def test_rescoring_same_winner_makes_no_further_change(self):
+        self._set_winner("A")
+        self.assertTrue(score_match(self.match.pk))
+        points_after_first = self._points(self.alice)
+        awarded_after_first = self._pred(self.alice).points_awarded
+
+        self.assertFalse(score_match(self.match.pk))
+        self.assertFalse(score_match(self.match.pk))
+
+        self.assertEqual(self._points(self.alice), points_after_first)
+        self.assertEqual(
+            self._pred(self.alice).points_awarded, awarded_after_first
+        )
+
+    # --- safe result correction --------------------------------------
+
+    def test_correcting_winner_reconciles_points_awarded(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._set_winner("B")
+        self.assertTrue(score_match(self.match.pk))
+        # A now loses, B now wins.
+        self.assertEqual(self._pred(self.alice).points_awarded, POINTS_WRONG)
+        self.assertEqual(self._pred(self.bob).points_awarded, POINTS_CORRECT)
+
+    def test_correcting_winner_reconciles_profile_points_without_double_counting(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self.assertEqual(self._points(self.alice), POINTS_CORRECT)   # +10
+        self.assertEqual(self._points(self.bob), POINTS_WRONG)       # -5
+
+        self._set_winner("B")
+        score_match(self.match.pk)
+        # alice: +10 -> -5 (delta -15); bob: -5 -> +10 (delta +15)
+        self.assertEqual(self._points(self.alice), POINTS_WRONG)
+        self.assertEqual(self._points(self.bob), POINTS_CORRECT)
+
+    def test_rescoring_after_correction_is_also_idempotent(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._set_winner("B")
+        self.assertTrue(score_match(self.match.pk))
+        self.assertFalse(score_match(self.match.pk))
+        self.assertEqual(self._points(self.alice), POINTS_WRONG)
+        self.assertEqual(self._points(self.bob), POINTS_CORRECT)
+
+    # --- clearing the winner unwinds a scored match -------------------
+
+    def test_clearing_winner_reverses_profile_points(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self.assertEqual(self._points(self.alice), POINTS_CORRECT)
+        self.assertEqual(self._points(self.bob), POINTS_WRONG)
+
+        self._clear_winner()
+        self.assertTrue(score_match(self.match.pk))
+        self.assertEqual(self._points(self.alice), 0)
+        self.assertEqual(self._points(self.bob), 0)
+
+    def test_clearing_winner_resets_points_awarded_to_none(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._clear_winner()
+        score_match(self.match.pk)
+        self.assertIsNone(self._pred(self.alice).points_awarded)
+        self.assertIsNone(self._pred(self.bob).points_awarded)
+
+    def test_clearing_winner_resets_is_scored_to_false(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._clear_winner()
         score_match(self.match.pk)
         self.match.refresh_from_db()
-        self.match.winner = self.match.team_b
-        with self.assertRaises(ValidationError):
-            self.match.full_clean()
+        self.assertFalse(self.match.is_scored)
+
+    def test_clearing_winner_again_is_idempotent(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._clear_winner()
+        self.assertTrue(score_match(self.match.pk))
+        self.assertFalse(score_match(self.match.pk))
+        self.assertEqual(self._points(self.alice), 0)
+        self.assertEqual(self._points(self.bob), 0)
+
+    def test_scoring_after_clearing_winner_scores_normally(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._clear_winner()
+        score_match(self.match.pk)
+
+        self._set_winner("B")
+        self.assertTrue(score_match(self.match.pk))
+        self.match.refresh_from_db()
+        self.assertTrue(self.match.is_scored)
+        # alice picked A, bob picked B; B now wins.
+        self.assertEqual(self._points(self.alice), POINTS_WRONG)
+        self.assertEqual(self._points(self.bob), POINTS_CORRECT)
+        self.assertEqual(self._pred(self.alice).points_awarded, POINTS_WRONG)
+        self.assertEqual(self._pred(self.bob).points_awarded, POINTS_CORRECT)
+
+
+class MatchAdminScoringTests(TestCase):
+    def setUp(self):
+        self.factory = RequestFactory()
+        self.match_admin = MatchAdmin(Match, AdminSite())
+        self.staff = User.objects.create_user(
+            "staff", password="pass12345", is_staff=True, is_superuser=True
+        )
+        self.alice = User.objects.create_user("alice", password="pass12345")
+        self.bob = User.objects.create_user("bob", password="pass12345")
+        self.match = future_match()
+        Prediction.objects.create(user=self.alice, match=self.match, choice="A")
+        Prediction.objects.create(user=self.bob, match=self.match, choice="B")
+
+    def _admin_set_winner(self, side):
+        # readonly is_scored keeps its DB value through an admin save, so mirror
+        # that by refreshing before editing.
+        self.match.refresh_from_db()
+        self.match.winner = (
+            self.match.team_a if side == "A" else self.match.team_b
+        )
+        request = self.factory.post("/admin/predictions/match/")
+        request.user = self.staff
+        request.session = self.client.session
+        request._messages = FallbackStorage(request)
+        self.match_admin.save_model(request, self.match, form=None, change=True)
+
+    def _admin_clear_winner(self):
+        self.match.refresh_from_db()
+        self.match.winner = None
+        request = self.factory.post("/admin/predictions/match/")
+        request.user = self.staff
+        request.session = self.client.session
+        request._messages = FallbackStorage(request)
+        self.match_admin.save_model(request, self.match, form=None, change=True)
+
+    def _points(self, user):
+        user.profile.refresh_from_db()
+        return user.profile.points
+
+    def test_setting_winner_in_admin_scores_predictions(self):
+        self._admin_set_winner("A")
+        self.match.refresh_from_db()
+        self.assertTrue(self.match.is_scored)
+        self.assertEqual(self._points(self.alice), POINTS_CORRECT)
+        self.assertEqual(self._points(self.bob), POINTS_WRONG)
+        pred = Prediction.objects.get(user=self.alice, match=self.match)
+        self.assertEqual(pred.points_awarded, POINTS_CORRECT)
+
+    def test_correcting_winner_in_admin_reconciles_the_score(self):
+        self._admin_set_winner("A")
+        self._admin_set_winner("B")
+        self.assertEqual(self._points(self.alice), POINTS_WRONG)
+        self.assertEqual(self._points(self.bob), POINTS_CORRECT)
+        self.assertEqual(
+            Prediction.objects.get(user=self.alice, match=self.match).points_awarded,
+            POINTS_WRONG,
+        )
+        self.assertEqual(
+            Prediction.objects.get(user=self.bob, match=self.match).points_awarded,
+            POINTS_CORRECT,
+        )
+
+    def test_clearing_winner_in_admin_unwinds_the_score(self):
+        self._admin_set_winner("A")
+        self._admin_clear_winner()
+
+        self.assertEqual(self._points(self.alice), 0)
+        self.assertEqual(self._points(self.bob), 0)
+        self.assertIsNone(
+            Prediction.objects.get(user=self.alice, match=self.match).points_awarded
+        )
+        self.assertIsNone(
+            Prediction.objects.get(user=self.bob, match=self.match).points_awarded
+        )
+        self.match.refresh_from_db()
+        self.assertFalse(self.match.is_scored)
 
 
 class UniquePredictionTests(TestCase):

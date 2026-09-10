@@ -43,6 +43,10 @@ class MatchAdmin(admin.ModelAdmin):
     autocomplete_fields = ("sport", "team_a", "team_b", "winner")
     date_hierarchy = "start_time"
     actions = ("publish_matches", "unpublish_matches")
+    # is_scored is managed by the scoring service. winner stays editable even
+    # after scoring so a mistaken result can be corrected (score_match then
+    # reconciles the points).
+    readonly_fields = ("is_scored",)
 
     @admin.action(description="Publish selected matches")
     def publish_matches(self, request, queryset):
@@ -54,28 +58,31 @@ class MatchAdmin(admin.ModelAdmin):
         updated = queryset.update(is_published=False)
         self.message_user(request, f"{updated} match(es) unpublished.", messages.SUCCESS)
 
-    def get_readonly_fields(self, request, obj=None):
-        readonly = ["is_scored"]
-        if obj and obj.is_scored:
-            readonly.append("winner")
-        return readonly
-
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
-        if obj.winner_id and not obj.is_scored:
-            if score_match(obj.pk):
-                messages.success(
-                    request,
-                    "Match scored. Correct predictions +10, incorrect -5.",
-                )
+        # score_match reconciles in every direction (first scoring, winner
+        # correction, winner cleared) and safely no-ops for an unscored match
+        # with no winner, so it is called on every save.
+        if score_match(obj.pk):
+            messages.success(
+                request,
+                "Predictions scored. Correct +10, incorrect -5.",
+            )
 
 
 @admin.register(Prediction)
 class PredictionAdmin(admin.ModelAdmin):
-    list_display = ("user", "match", "choice", "updated_at")
+    list_display = ("user", "match", "choice", "points_awarded", "updated_at")
     list_filter = ("choice",)
     search_fields = ("user__username", "match__team_a__name", "match__team_b__name")
-    readonly_fields = ("user", "match", "choice", "created_at", "updated_at")
+    readonly_fields = (
+        "user",
+        "match",
+        "choice",
+        "points_awarded",
+        "created_at",
+        "updated_at",
+    )
 
     def has_add_permission(self, request):
         return False
