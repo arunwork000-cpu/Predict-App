@@ -1,6 +1,8 @@
+import re
 from datetime import timedelta
 
 from django.contrib.auth.models import User
+from django.core import mail
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.db.models import ProtectedError
@@ -214,6 +216,97 @@ class AccountTests(TestCase):
         self.client.login(username="alice", password="StrongPass123")
         response = self.client.get(reverse("logout"))
         self.assertEqual(response.status_code, 405)
+
+
+class PasswordResetFlowTests(TestCase):
+    NEW_PASSWORD = "StrongNewPass123"
+
+    def setUp(self):
+        self.user = User.objects.create_user(
+            "resetuser", email="reset@example.com", password="oldpass12345"
+        )
+
+    def _request_reset(self, email="reset@example.com"):
+        return self.client.post(reverse("password_reset"), {"email": email})
+
+    def test_password_reset_page_renders_on_project_shell(self):
+        response = self.client.get(reverse("password_reset"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "registration/password_reset_form.html")
+        self.assertTemplateUsed(response, "base.html")
+        self.assertContains(response, "Sports Predictions")  # navbar brand
+
+    def test_login_page_links_to_password_reset(self):
+        response = self.client.get(reverse("login"))
+        self.assertContains(response, reverse("password_reset"))
+        self.assertContains(response, "Forgot your password?")
+
+    def test_valid_email_redirects_to_done_and_sends_one_email(self):
+        response = self._request_reset()
+        self.assertRedirects(response, reverse("password_reset_done"))
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("reset@example.com", mail.outbox[0].to)
+
+    def test_done_page_renders_on_project_shell(self):
+        response = self.client.get(reverse("password_reset_done"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "registration/password_reset_done.html")
+        self.assertContains(response, "Sports Predictions")
+
+    def test_full_flow_from_email_link_to_login_with_new_password(self):
+        self._request_reset()
+        link = re.search(
+            r"/accounts/reset/[^/\s]+/[^/\s]+/", mail.outbox[0].body
+        )
+        self.assertIsNotNone(link, "reset email should contain a reset link")
+
+        # The emailed link redirects to the set-password page.
+        redirected = self.client.get(link.group(0))
+        self.assertEqual(redirected.status_code, 302)
+        set_password_url = redirected.url
+
+        confirm_page = self.client.get(set_password_url)
+        self.assertEqual(confirm_page.status_code, 200)
+        self.assertTemplateUsed(
+            confirm_page, "registration/password_reset_confirm.html"
+        )
+        self.assertContains(confirm_page, "Sports Predictions")
+
+        completed = self.client.post(
+            set_password_url,
+            {
+                "new_password1": self.NEW_PASSWORD,
+                "new_password2": self.NEW_PASSWORD,
+            },
+        )
+        self.assertRedirects(completed, reverse("password_reset_complete"))
+
+        complete_page = self.client.get(reverse("password_reset_complete"))
+        self.assertEqual(complete_page.status_code, 200)
+        self.assertTemplateUsed(
+            complete_page, "registration/password_reset_complete.html"
+        )
+        self.assertContains(complete_page, "Sports Predictions")
+
+        self.assertTrue(
+            self.client.login(username="resetuser", password=self.NEW_PASSWORD)
+        )
+
+    def test_invalid_reset_link_shows_error_state(self):
+        url = reverse(
+            "password_reset_confirm",
+            kwargs={"uidb64": "MQ", "token": "set-password"},
+        )
+        response = self.client.get(url)
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.context["validlink"])
+        self.assertContains(response, "invalid")
+        self.assertContains(response, reverse("password_reset"))
+
+    def test_unknown_email_does_not_reveal_account_and_sends_nothing(self):
+        response = self._request_reset(email="nobody@example.com")
+        self.assertRedirects(response, reverse("password_reset_done"))
+        self.assertEqual(len(mail.outbox), 0)
 
 
 class PageTests(TestCase):
