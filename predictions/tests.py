@@ -1,5 +1,8 @@
+import os
 import re
 from datetime import timedelta
+from pathlib import Path
+from unittest import mock
 
 from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import User
@@ -8,7 +11,7 @@ from django.core import mail
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
 from django.db.models import ProtectedError
-from django.test import Client, RequestFactory, TestCase
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase
 from django.urls import reverse
 from django.utils import timezone
 
@@ -1238,3 +1241,75 @@ class MatchAdminActionTests(TestCase):
         )
         self.match.refresh_from_db()
         self.assertFalse(self.match.is_published)
+
+
+class SettingsSecurityTests(SimpleTestCase):
+    """config/settings.py: HTTPS / secure-cookie config only under DEBUG=False.
+
+    These load the settings file in an isolated namespace with a patched
+    environment; they assume the repo has no local .env file (it is gitignored).
+    """
+
+    SETTINGS_PATH = Path(__file__).resolve().parent.parent / "config" / "settings.py"
+
+    def _load(self, **environment):
+        namespace = {"__file__": str(self.SETTINGS_PATH)}
+        source = self.SETTINGS_PATH.read_text()
+        with mock.patch.dict(os.environ, environment, clear=True):
+            exec(compile(source, str(self.SETTINGS_PATH), "exec"), namespace)
+        return namespace
+
+    def _production(self, **extra):
+        return self._load(
+            DEBUG="False",
+            SECRET_KEY="x" * 50,
+            ALLOWED_HOSTS="example.com",
+            **extra,
+        )
+
+    def test_local_development_has_no_https_enforcement(self):
+        settings = self._load(DEBUG="True")
+        self.assertTrue(settings["DEBUG"])
+        for name in (
+            "SECURE_SSL_REDIRECT",
+            "SESSION_COOKIE_SECURE",
+            "CSRF_COOKIE_SECURE",
+            "SECURE_HSTS_SECONDS",
+            "SECURE_HSTS_INCLUDE_SUBDOMAINS",
+            "SECURE_HSTS_PRELOAD",
+            "SECURE_PROXY_SSL_HEADER",
+            "CSRF_TRUSTED_ORIGINS",
+        ):
+            self.assertNotIn(name, settings, f"{name} must not be set in development")
+
+    def test_production_enables_https_and_secure_cookies(self):
+        settings = self._production()
+        self.assertFalse(settings["DEBUG"])
+        self.assertTrue(settings["SECURE_SSL_REDIRECT"])
+        self.assertTrue(settings["SESSION_COOKIE_SECURE"])
+        self.assertTrue(settings["CSRF_COOKIE_SECURE"])
+        self.assertEqual(
+            settings["SECURE_PROXY_SSL_HEADER"],
+            ("HTTP_X_FORWARDED_PROTO", "https"),
+        )
+        self.assertGreater(settings["SECURE_HSTS_SECONDS"], 0)
+        self.assertTrue(settings["SECURE_HSTS_INCLUDE_SUBDOMAINS"])
+        self.assertTrue(settings["SECURE_HSTS_PRELOAD"])
+        self.assertEqual(settings["CSRF_TRUSTED_ORIGINS"], [])
+
+    def test_production_security_values_are_environment_overridable(self):
+        settings = self._production(
+            SECURE_SSL_REDIRECT="False",
+            SECURE_HSTS_SECONDS="60",
+            SECURE_HSTS_INCLUDE_SUBDOMAINS="False",
+            SECURE_HSTS_PRELOAD="False",
+            CSRF_TRUSTED_ORIGINS="https://a.example,https://b.example",
+        )
+        self.assertFalse(settings["SECURE_SSL_REDIRECT"])
+        self.assertEqual(settings["SECURE_HSTS_SECONDS"], 60)
+        self.assertFalse(settings["SECURE_HSTS_INCLUDE_SUBDOMAINS"])
+        self.assertFalse(settings["SECURE_HSTS_PRELOAD"])
+        self.assertEqual(
+            settings["CSRF_TRUSTED_ORIGINS"],
+            ["https://a.example", "https://b.example"],
+        )

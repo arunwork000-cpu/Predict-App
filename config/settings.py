@@ -47,6 +47,26 @@ else:
 
 ALLOWED_HOSTS = env('ALLOWED_HOSTS')
 
+# Production HTTPS / secure-cookie settings. Active only when DEBUG is False, so
+# local development over plain HTTP is unchanged. TLS is assumed to be
+# terminated by a reverse proxy that forwards the X-Forwarded-Proto header.
+if not DEBUG:
+    SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+    SECURE_SSL_REDIRECT = env.bool('SECURE_SSL_REDIRECT', default=True)
+
+    SESSION_COOKIE_SECURE = True
+    CSRF_COOKIE_SECURE = True
+
+    SECURE_HSTS_SECONDS = env.int('SECURE_HSTS_SECONDS', default=3600)
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = env.bool(
+        'SECURE_HSTS_INCLUDE_SUBDOMAINS', default=True
+    )
+    SECURE_HSTS_PRELOAD = env.bool('SECURE_HSTS_PRELOAD', default=True)
+
+    # Full origins (scheme + host) allowed to submit forms / use the admin, e.g.
+    # CSRF_TRUSTED_ORIGINS=https://example.com,https://www.example.com
+    CSRF_TRUSTED_ORIGINS = env.list('CSRF_TRUSTED_ORIGINS', default=[])
+
 
 # Application definition
 
