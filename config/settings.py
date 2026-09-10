@@ -210,3 +210,47 @@ MESSAGE_TAGS = {
 
 # Development: print emails (e.g. password reset) to the console.
 EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+
+# Logging
+# https://docs.djangoproject.com/en/6.1/topics/logging/
+
+# In development Django's built-in configuration already logs to the console.
+# In production (DEBUG=False) that console handler is disabled and errors are
+# routed to the unconfigured admin-email handler, so define a minimal
+# stream configuration that writes to stderr instead. LOG_LEVEL is
+# environment-configurable (e.g. LOG_LEVEL=DEBUG for a temporary deep dive).
+if not DEBUG:
+    LOGGING = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'formatters': {
+            'default': {
+                'format': '{asctime} {levelname} {name}: {message}',
+                'style': '{',
+            },
+        },
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+                'formatter': 'default',
+            },
+        },
+        'loggers': {
+            'django': {
+                'handlers': ['console'],
+                'level': env('LOG_LEVEL', default='INFO'),
+                'propagate': False,
+            },
+            'django.request': {
+                'handlers': ['console'],
+                'level': 'ERROR',
+                'propagate': False,
+            },
+            'predictions': {
+                'handlers': ['console'],
+                'level': env('LOG_LEVEL', default='INFO'),
+                'propagate': False,
+            },
+        },
+    }
