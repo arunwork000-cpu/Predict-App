@@ -41,6 +41,18 @@ class MatchAdmin(admin.ModelAdmin):
     list_filter = ("sport", "status", "is_published", "is_scored")
     search_fields = ("team_a__name", "team_b__name")
     autocomplete_fields = ("sport", "team_a", "team_b", "winner")
+    date_hierarchy = "start_time"
+    actions = ("publish_matches", "unpublish_matches")
+
+    @admin.action(description="Publish selected matches")
+    def publish_matches(self, request, queryset):
+        updated = queryset.update(is_published=True)
+        self.message_user(request, f"{updated} match(es) published.", messages.SUCCESS)
+
+    @admin.action(description="Unpublish selected matches")
+    def unpublish_matches(self, request, queryset):
+        updated = queryset.update(is_published=False)
+        self.message_user(request, f"{updated} match(es) unpublished.", messages.SUCCESS)
 
     def get_readonly_fields(self, request, obj=None):
         readonly = ["is_scored"]

@@ -134,8 +134,5 @@ MESSAGE_TAGS = {
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-MAILERS = {
-    'default': {
-        'BACKEND': 'django.core.mail.backends.console.EmailBackend',
-    },
-}
+# Development: print emails (e.g. password reset) to the console.
+EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'

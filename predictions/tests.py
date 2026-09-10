@@ -3,6 +3,7 @@ from datetime import timedelta
 from django.contrib.auth.models import User
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError
+from django.db.models import ProtectedError
 from django.test import TestCase
 from django.urls import reverse
 from django.utils import timezone
@@ -292,3 +293,74 @@ class MatchModelTests(TestCase):
         with self.assertRaises(ValidationError) as ctx:
             match.full_clean()
         self.assertIn("prediction_deadline", ctx.exception.message_dict)
+
+
+class SportModelTests(TestCase):
+    def test_str_is_name(self):
+        self.assertEqual(str(Sport.objects.create(name="Football")), "Football")
+
+    def test_name_must_be_unique_in_the_database(self):
+        Sport.objects.create(name="Football")
+        with self.assertRaises(IntegrityError):
+            Sport.objects.create(name="Football")
+
+    def test_duplicate_name_fails_full_clean(self):
+        Sport.objects.create(name="Football")
+        with self.assertRaises(ValidationError):
+            Sport(name="Football").full_clean()
+
+
+class TeamModelTests(TestCase):
+    def setUp(self):
+        self.football = Sport.objects.create(name="Football")
+        self.cricket = Sport.objects.create(name="Cricket")
+
+    def test_str_is_name(self):
+        team = Team.objects.create(name="Lions", sport=self.football)
+        self.assertEqual(str(team), "Lions")
+
+    def test_name_must_be_unique_per_sport(self):
+        Team.objects.create(name="Lions", sport=self.football)
+        with self.assertRaises(IntegrityError):
+            Team.objects.create(name="Lions", sport=self.football)
+
+    def test_same_name_allowed_in_a_different_sport(self):
+        Team.objects.create(name="Lions", sport=self.football)
+        Team.objects.create(name="Lions", sport=self.cricket)
+        self.assertEqual(Team.objects.filter(name="Lions").count(), 2)
+
+    def test_duplicate_per_sport_fails_full_clean(self):
+        Team.objects.create(name="Lions", sport=self.football)
+        with self.assertRaises(ValidationError):
+            Team(name="Lions", sport=self.football).full_clean()
+
+    def test_sport_is_protected_while_teams_exist(self):
+        Team.objects.create(name="Lions", sport=self.football)
+        with self.assertRaises(ProtectedError):
+            self.football.delete()
+
+
+class MatchAdminActionTests(TestCase):
+    def setUp(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
+        self.match = future_match(is_published=False)
+        self.url = reverse("admin:predictions_match_changelist")
+
+    def test_publish_action_publishes_selected_matches(self):
+        self.client.post(
+            self.url,
+            {"action": "publish_matches", "_selected_action": [self.match.pk]},
+        )
+        self.match.refresh_from_db()
+        self.assertTrue(self.match.is_published)
+
+    def test_unpublish_action_hides_selected_matches(self):
+        self.match.is_published = True
+        self.match.save(update_fields=["is_published"])
+        self.client.post(
+            self.url,
+            {"action": "unpublish_matches", "_selected_action": [self.match.pk]},
+        )
+        self.match.refresh_from_db()
+        self.assertFalse(self.match.is_published)
