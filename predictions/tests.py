@@ -435,6 +435,120 @@ class MyPredictionsViewTests(TestCase):
         self.assertContains(response, "No decided predictions yet")
 
 
+class MatchDetailViewTests(TestCase):
+    def setUp(self):
+        self.user = User.objects.create_user("alice", password="pass12345")
+
+    def _match(self, label, **kwargs):
+        sport = Sport.objects.create(name=f"Sport {label}")
+        return future_match(
+            sport=sport,
+            team_a=Team.objects.create(name=f"A {label}", sport=sport),
+            team_b=Team.objects.create(name=f"B {label}", sport=sport),
+            **kwargs,
+        )
+
+    def _score(self, match, winning_side):
+        match.winner = match.team_a if winning_side == "A" else match.team_b
+        match.save()
+        self.assertTrue(score_match(match.pk))
+        match.refresh_from_db()
+
+    def _login(self):
+        self.client.login(username="alice", password="pass12345")
+
+    def test_unpublished_match_returns_404(self):
+        match = self._match("hidden", is_published=False)
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_published_match_returns_200(self):
+        match = self._match("core")
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertEqual(response.status_code, 200)
+
+    def test_page_shows_teams_sport_kickoff_and_deadline(self):
+        match = self._match("core")
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertContains(response, "A core")
+        self.assertContains(response, "B core")
+        self.assertContains(response, "Sport core")
+        self.assertContains(response, "Kickoff")
+        self.assertContains(response, "Prediction deadline")
+
+    def test_open_match_shows_open_and_predict_link(self):
+        match = self._match("open")
+        self._login()
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertEqual(response.context["state"], "open")
+        self.assertContains(response, "Open")
+        self.assertContains(response, reverse("predict", args=[match.pk]))
+
+    def test_locked_match_shows_locked_and_no_predict_link(self):
+        match = self._match(
+            "locked",
+            start_time=timezone.now() - timedelta(minutes=5),
+            prediction_deadline=timezone.now() - timedelta(hours=1),
+        )
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertEqual(response.context["state"], "locked")
+        self.assertContains(response, "Locked")
+        self.assertNotContains(response, reverse("predict", args=[match.pk]))
+
+    def test_cancelled_match_shows_cancelled_and_no_predict_link(self):
+        match = self._match("cancelled", status=Match.Status.CANCELLED)
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertEqual(response.context["state"], "cancelled")
+        self.assertContains(response, "Cancelled")
+        self.assertNotContains(response, reverse("predict", args=[match.pk]))
+
+    def test_completed_scored_match_shows_winner(self):
+        match = self._match("done")
+        self._score(match, "A")
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertEqual(response.context["state"], "completed")
+        self.assertContains(response, "Result:")
+        self.assertContains(response, match.winner_name())
+
+    def test_correct_prediction_shows_hit_and_plus_ten(self):
+        match = self._match("hit")
+        Prediction.objects.create(user=self.user, match=match, choice="A")
+        self._score(match, "A")
+        self._login()
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertContains(response, "Hit")
+        self.assertContains(response, "+10")
+
+    def test_incorrect_prediction_shows_miss_and_minus_five(self):
+        match = self._match("miss")
+        Prediction.objects.create(user=self.user, match=match, choice="A")
+        self._score(match, "B")
+        self._login()
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertContains(response, "Miss")
+        self.assertContains(response, "-5")
+
+    def test_existing_prediction_shows_pick_and_change_pick(self):
+        match = self._match("pick")
+        Prediction.objects.create(user=self.user, match=match, choice="A")
+        self._login()
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertContains(response, "Your pick")
+        self.assertContains(response, "A pick")
+        self.assertContains(response, "Change pick")
+
+    def test_guest_on_open_match_sees_login_to_predict(self):
+        match = self._match("guest")
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertContains(response, "Log in to predict")
+        self.assertNotContains(response, reverse("predict", args=[match.pk]))
+
+    def test_match_list_links_to_detail_page(self):
+        match = self._match("linked")
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, reverse("match_detail", args=[match.pk]))
+
+
 class MatchAdminActionTests(TestCase):
     def setUp(self):
         User.objects.create_superuser("root", "root@example.com", "pass12345")

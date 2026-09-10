@@ -36,6 +36,40 @@ def match_list(request):
     )
 
 
+def match_detail(request, pk):
+    """Read-only page for a single published match and its status."""
+    match = get_object_or_404(
+        Match.objects.select_related("sport", "team_a", "team_b", "winner"),
+        pk=pk,
+        is_published=True,
+    )
+
+    if match.status == Match.Status.CANCELLED:
+        state = "cancelled"
+    elif match.winner_id:
+        state = "completed"
+    elif match.predictions_open:
+        state = "open"
+    else:
+        state = "locked"
+
+    user_prediction = None
+    if request.user.is_authenticated:
+        user_prediction = Prediction.objects.filter(
+            user=request.user, match=match
+        ).first()
+
+    return render(
+        request,
+        "predictions/match_detail.html",
+        {
+            "match": match,
+            "state": state,
+            "user_prediction": user_prediction,
+        },
+    )
+
+
 @login_required
 def predict(request, pk):
     match = get_object_or_404(Match, pk=pk)

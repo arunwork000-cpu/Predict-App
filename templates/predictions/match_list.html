@@ -11,7 +11,7 @@
       <div class="list-group-item">
         <div class="d-flex justify-content-between align-items-start gap-3">
           <div>
-            <strong>{{ match.team_a }} vs {{ match.team_b }}</strong>
+            <strong><a href="{% url 'match_detail' match.pk %}">{{ match.team_a }} vs {{ match.team_b }}</a></strong>
             <div class="small text-muted">Kickoff: {{ match.start_time }} · Deadline: {{ match.prediction_deadline }}</div>
             {% if match.user_pick %}
               <div class="small mt-1">Your pick: <strong>{{ match.user_pick.choice_name }}</strong></div>
@@ -37,7 +37,7 @@
   <div class="list-group">
     {% for match in closed_matches %}
       <div class="list-group-item">
-        <strong>{{ match.team_a }} vs {{ match.team_b }}</strong>
+        <strong><a href="{% url 'match_detail' match.pk %}">{{ match.team_a }} vs {{ match.team_b }}</a></strong>
         <div class="small text-muted">Kickoff: {{ match.start_time }} · Deadline: {{ match.prediction_deadline }}</div>
         <div class="small mt-1">
           {% if match.winner %}
