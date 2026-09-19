@@ -107,6 +107,7 @@ TEMPLATES = [
                 'django.contrib.auth.context_processors.auth',
                 'django.contrib.messages.context_processors.messages',
                 'predictions.context_processors.user_points',
+                'predictions.context_processors.public_nav',
             ],
         },
     },
@@ -177,6 +178,11 @@ USE_TZ = True
 
 STATIC_URL = '/static/'
 STATIC_ROOT = BASE_DIR / 'staticfiles'
+
+# Media files (user uploads, e.g. team flags)
+# https://docs.djangoproject.com/en/6.1/topics/files/
+MEDIA_URL = '/media/'
+MEDIA_ROOT = BASE_DIR / 'media'
 
 STORAGES = {
     'default': {

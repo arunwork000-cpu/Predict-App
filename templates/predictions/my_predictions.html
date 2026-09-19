@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load prediction_extras %}
 {% block title %}My Predictions{% endblock %}
 {% block content %}
 <h1 class="h3 mb-2">My Predictions</h1>
@@ -19,7 +20,7 @@
         {% for p in pending %}
           <tr>
             <td>
-              {{ p.match.team_a }} vs {{ p.match.team_b }}
+              {% team_flag p.match.team_a %}{{ p.match.team_a }} vs {% team_flag p.match.team_b %}{{ p.match.team_b }}
               {% if p.match.status == "live" %}
                 <span class="badge text-bg-warning">Live</span>
               {% endif %}
@@ -51,7 +52,7 @@
       <tbody>
         {% for p in decided %}
           <tr>
-            <td>{{ p.match.team_a }} vs {{ p.match.team_b }}</td>
+            <td>{% team_flag p.match.team_a %}{{ p.match.team_a }} vs {% team_flag p.match.team_b %}{{ p.match.team_b }}</td>
             <td>{{ p.choice_name }}</td>
             <td>{{ p.match.winner_name }}</td>
             <td>
@@ -89,7 +90,7 @@
       <tbody>
         {% for p in cancelled %}
           <tr>
-            <td>{{ p.match.team_a }} vs {{ p.match.team_b }}</td>
+            <td>{% team_flag p.match.team_a %}{{ p.match.team_a }} vs {% team_flag p.match.team_b %}{{ p.match.team_b }}</td>
             <td>{{ p.choice_name }}</td>
             <td><span class="badge text-bg-secondary">Cancelled</span></td>
             <td>0</td>

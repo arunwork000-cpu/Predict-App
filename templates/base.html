@@ -19,19 +19,70 @@
       list-style: none;
       padding-left: 0;
     }
+    .pick-btn {
+      white-space: normal;
+      word-break: break-word;
+      line-height: 1.3;
+      padding: .5rem .4rem;
+    }
+    .pick-panel {
+      width: 100%;
+    }
+    @media (min-width: 768px) {
+      .pick-panel {
+        width: 50%;
+      }
+    }
+    .team-flag {
+      height: 16px;
+      width: 22px;
+      object-fit: cover;
+      border: 1px solid rgba(0, 0, 0, .15);
+      border-radius: 2px;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
+    .predict-now-badge {
+      font-size: .65rem;
+      padding: .15em .5em;
+      margin-top: 2px;
+    }
+    .medal-icon {
+      width: 26px;
+      height: 26px;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
+    @media (max-width: 575.98px) {
+      .medal-icon {
+        width: 24px;
+        height: 24px;
+      }
+    }
   </style>
 </head>
 <body class="bg-light">
   <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
     <div class="container">
-      <a class="navbar-brand" href="{% url 'match_list' %}">Sports Predictions</a>
       <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav">
         <span class="navbar-toggler-icon"></span>
       </button>
       <div class="collapse navbar-collapse" id="nav">
-        <ul class="navbar-nav me-auto">
+        <ul class="navbar-nav me-auto flex-wrap">
+          {% for sport in nav_sports %}
+            <li class="nav-item">
+              <a class="nav-link lh-sm {% if sport.slug == sport_slug %}active{% endif %}"
+                 href="{% url 'sport_matches' sport.slug %}">
+                {{ sport.name }}
+                {% if sport.has_open %}
+                  <span class="badge text-bg-success d-block predict-now-badge">Predict now</span>
+                {% endif %}
+              </a>
+            </li>
+          {% endfor %}
           <li class="nav-item">
-            <a class="nav-link" href="{% url 'match_list' %}">Matches</a>
+            <a class="nav-link {% if request.resolver_match.url_name == 'closed_matches' %}active{% endif %}"
+               href="{% url 'closed_matches' %}">Closed Matches</a>
           </li>
           {% if user.is_authenticated %}
             <li class="nav-item">
@@ -39,7 +90,16 @@
             </li>
           {% endif %}
           <li class="nav-item">
-            <a class="nav-link" href="{% url 'leaderboard' %}">Leaderboard</a>
+            <a class="nav-link lh-sm py-2 {% if request.resolver_match.url_name == 'leaderboard_all_time' %}active{% endif %}"
+               href="{% url 'leaderboard_all_time' %}">
+              Leaderboard<small class="d-block text-white-50">All time</small>
+            </a>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link lh-sm py-2 {% if request.resolver_match.url_name == 'leaderboard_monthly' %}active{% endif %}"
+               href="{% url 'leaderboard_monthly' %}">
+              Leaderboard<small class="d-block text-white-50">Monthly</small>
+            </a>
           </li>
         </ul>
         <ul class="navbar-nav align-items-lg-center gap-lg-2">

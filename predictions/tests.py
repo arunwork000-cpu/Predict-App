@@ -1,5 +1,9 @@
+import base64
 import os
 import re
+import shutil
+import tempfile
+import uuid
 from datetime import timedelta
 from pathlib import Path
 from unittest import mock
@@ -9,20 +13,57 @@ from django.contrib.auth.models import User
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core import mail
 from django.core.exceptions import ValidationError
+from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
 from django.db.models import ProtectedError
-from django.test import Client, RequestFactory, SimpleTestCase, TestCase
+from django.test import Client, RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
 from .admin import MatchAdmin
-from .models import Match, Prediction, Profile, Sport, Team
+from .constants import SUPPORTED_SPORTS
+from .locations import STATES_BY_COUNTRY
+from .models import Match, Prediction, Profile, ScoreAdjustment, Sport, Team
 from .services import POINTS_CORRECT, POINTS_WRONG, score_match
+from .templatetags.prediction_extras import team_flag
+
+# A valid 1x1 transparent PNG, used as dummy upload data for flag tests.
+TINY_PNG = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+    "+A8AAQUBAScY42YAAAAASUVORK5CYII="
+)
+
+
+def make_flag(name="flag.png"):
+    return SimpleUploadedFile(name, TINY_PNG, content_type="image/png")
+
+
+class MediaIsolatedTestCase(TestCase):
+    """Base class for tests that upload files, using a throwaway MEDIA_ROOT
+    so test uploads never land in (or pollute) the real media/ directory."""
+
+    @classmethod
+    def setUpClass(cls):
+        super().setUpClass()
+        cls._media_root = tempfile.mkdtemp(prefix="predictions_test_media_")
+        cls._media_override = override_settings(MEDIA_ROOT=cls._media_root)
+        cls._media_override.enable()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls._media_override.disable()
+        shutil.rmtree(cls._media_root, ignore_errors=True)
+        super().tearDownClass()
 
 
 def future_match(**kwargs):
     now = timezone.now()
-    sport = kwargs.pop("sport", None) or Sport.objects.create(name="Football")
+    # A fresh, uniquely-named sport by default -- "Football"/"Cricket"/etc are
+    # reserved names seeded by a data migration, so tests that don't care
+    # which sport they use must not collide with those.
+    sport = kwargs.pop("sport", None) or Sport.objects.create(
+        name=f"Sport {uuid.uuid4().hex[:10]}"
+    )
     team_a = kwargs.pop("team_a", None) or Team.objects.create(
         name="Lions", sport=sport
     )
@@ -102,6 +143,74 @@ class ScoringTests(TestCase):
         self._set_winner("A")
         score_match(self.match.pk)
         self.assertEqual(self._points(carol), 0)
+
+    # --- ScoreAdjustment ledger (backs the monthly leaderboard) --------
+
+    def test_scoring_records_one_ledger_row_per_prediction(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+
+        alice_delta = ScoreAdjustment.objects.get(user=self.alice, match=self.match).delta
+        bob_delta = ScoreAdjustment.objects.get(user=self.bob, match=self.match).delta
+        self.assertEqual(alice_delta, POINTS_CORRECT)
+        self.assertEqual(bob_delta, POINTS_WRONG)
+
+    def test_rescoring_same_winner_creates_no_extra_ledger_rows(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        score_match(self.match.pk)
+        score_match(self.match.pk)
+
+        self.assertEqual(
+            ScoreAdjustment.objects.filter(user=self.alice, match=self.match).count(), 1
+        )
+
+    def test_winner_correction_adds_a_reconciling_ledger_row(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._set_winner("B")
+        score_match(self.match.pk)
+
+        rows = list(
+            ScoreAdjustment.objects.filter(user=self.alice, match=self.match).order_by(
+                "id"
+            )
+        )
+        self.assertEqual([r.delta for r in rows], [POINTS_CORRECT, POINTS_WRONG - POINTS_CORRECT])
+        self.assertEqual(sum(r.delta for r in rows), POINTS_WRONG)
+
+    def test_clearing_winner_adds_a_reversing_ledger_row(self):
+        self._set_winner("A")
+        score_match(self.match.pk)
+        self._clear_winner()
+        score_match(self.match.pk)
+
+        rows = list(
+            ScoreAdjustment.objects.filter(user=self.alice, match=self.match).order_by(
+                "id"
+            )
+        )
+        self.assertEqual([r.delta for r in rows], [POINTS_CORRECT, -POINTS_CORRECT])
+        self.assertEqual(sum(r.delta for r in rows), 0)
+
+    def test_scoring_uses_match_configured_points_not_global_defaults(self):
+        self.match.team_a_win_points = 25
+        self.match.team_a_lose_points = -12
+        self.match.team_b_win_points = 40
+        self.match.team_b_lose_points = -1
+        self.match.save()
+
+        self._set_winner("A")
+        score_match(self.match.pk)
+        # alice picked A (wins), bob picked B (loses).
+        self.assertEqual(self._points(self.alice), 25)
+        self.assertEqual(self._points(self.bob), -1)
+
+        self._set_winner("B")
+        score_match(self.match.pk)
+        # alice's A now loses, bob's B now wins.
+        self.assertEqual(self._points(self.alice), -12)
+        self.assertEqual(self._points(self.bob), 40)
 
     # --- points stored per prediction ---------------------------------
 
@@ -364,19 +473,26 @@ class PredictViewTests(TestCase):
         self.assertContains(response, 'href="%s"' % detail_url)
 
 
+def registration_data(**overrides):
+    data = {
+        "username": "newuser",
+        "password1": "StrongPass123",
+        "password2": "StrongPass123",
+        "country": "India",
+        "state": "Kerala",
+    }
+    data.update(overrides)
+    return data
+
+
 class AccountTests(TestCase):
     def test_register_creates_user_profile_and_logs_in(self):
-        response = self.client.post(
-            reverse("register"),
-            {
-                "username": "newuser",
-                "password1": "StrongPass123",
-                "password2": "StrongPass123",
-            },
-        )
+        response = self.client.post(reverse("register"), registration_data())
         self.assertRedirects(response, reverse("match_list"))
         user = User.objects.get(username="newuser")
         self.assertTrue(Profile.objects.filter(user=user).exists())
+        self.assertEqual(user.profile.country, "India")
+        self.assertEqual(user.profile.state, "Kerala")
         home = self.client.get(reverse("match_list"))
         self.assertContains(home, "newuser")
         self.assertContains(home, "Log out")
@@ -385,12 +501,7 @@ class AccountTests(TestCase):
     def test_register_rejects_duplicate_username(self):
         User.objects.create_user("taken", password="StrongPass123")
         response = self.client.post(
-            reverse("register"),
-            {
-                "username": "taken",
-                "password1": "StrongPass123",
-                "password2": "StrongPass123",
-            },
+            reverse("register"), registration_data(username="taken")
         )
         self.assertEqual(response.status_code, 200)
         self.assertEqual(User.objects.filter(username="taken").count(), 1)
@@ -444,6 +555,89 @@ class AccountTests(TestCase):
         self.client.login(username="alice", password="StrongPass123")
         response = self.client.get(reverse("logout"))
         self.assertEqual(response.status_code, 405)
+
+
+class RegistrationLocationTests(TestCase):
+    """Country/State are required, dropdown-only, and cross-validated."""
+
+    def test_registration_form_renders_country_and_state_as_selects(self):
+        response = self.client.get(reverse("register"))
+        self.assertContains(response, '<select name="country"')
+        self.assertContains(response, '<select name="state"')
+
+    def test_missing_country_is_rejected(self):
+        response = self.client.post(reverse("register"), registration_data(country=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+        self.assertIn("country", response.context["form"].errors)
+
+    def test_missing_state_is_rejected(self):
+        response = self.client.post(reverse("register"), registration_data(state=""))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+        self.assertIn("state", response.context["form"].errors)
+
+    def test_invalid_country_value_is_rejected(self):
+        response = self.client.post(
+            reverse("register"), registration_data(country="Narnia")
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+        self.assertIn("country", response.context["form"].errors)
+
+    def test_invalid_state_value_is_rejected(self):
+        response = self.client.post(
+            reverse("register"), registration_data(state="Atlantis")
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+        self.assertIn("state", response.context["form"].errors)
+
+    def test_state_not_belonging_to_selected_country_is_rejected(self):
+        # Texas is a real, listed state -- just not one of India's.
+        response = self.client.post(
+            reverse("register"), registration_data(country="India", state="Texas")
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+        self.assertIn("state", response.context["form"].errors)
+
+    def test_all_nine_countries_accept_a_state_from_their_own_list(self):
+        for index, (country, states) in enumerate(STATES_BY_COUNTRY.items()):
+            response = self.client.post(
+                reverse("register"),
+                registration_data(
+                    username=f"country{index}", country=country, state=states[0]
+                ),
+            )
+            self.assertRedirects(response, reverse("match_list"))
+            user = User.objects.get(username=f"country{index}")
+            self.assertEqual(user.profile.country, country)
+            self.assertEqual(user.profile.state, states[0])
+            self.client.logout()
+
+    def test_representative_subdivision_per_country_is_accepted(self):
+        cases = [
+            ("India", "Kerala"),
+            ("Bahrain", "Capital Governorate"),
+            ("Kuwait", "Hawalli"),
+            ("Oman", "Muscat"),
+            ("Qatar", "Doha"),
+            ("Saudi Arabia", "Riyadh"),
+            ("United Arab Emirates (UAE)", "Dubai"),
+            ("United Kingdom (UK)", "Scotland"),
+            ("United States (USA)", "California"),
+        ]
+        for index, (country, state) in enumerate(cases):
+            response = self.client.post(
+                reverse("register"),
+                registration_data(username=f"rep{index}", country=country, state=state),
+            )
+            self.assertRedirects(response, reverse("match_list"))
+            user = User.objects.get(username=f"rep{index}")
+            self.assertEqual(user.profile.country, country)
+            self.assertEqual(user.profile.state, state)
+            self.client.logout()
 
 
 class PasswordResetFlowTests(TestCase):
@@ -614,16 +808,16 @@ class PasswordChangeFlowTests(TestCase):
 class PageTests(TestCase):
     def test_home_empty_state(self):
         response = self.client.get(reverse("match_list"))
-        self.assertContains(response, "No upcoming matches")
+        self.assertContains(response, "No upcoming Football matches")
 
     def test_leaderboard_empty_state(self):
-        response = self.client.get(reverse("leaderboard"))
+        response = self.client.get(reverse("leaderboard_all_time"))
         self.assertContains(response, "No players yet")
 
 
 class MatchModelTests(TestCase):
     def setUp(self):
-        self.sport = Sport.objects.create(name="Cricket")
+        self.sport = Sport.objects.create(name="Rugby")
         self.team_a = Team.objects.create(name="India", sport=self.sport)
         self.team_b = Team.objects.create(name="Australia", sport=self.sport)
         self.now = timezone.now()
@@ -658,7 +852,7 @@ class MatchModelTests(TestCase):
             Match.objects.create(**self.valid_kwargs(team_b=self.team_a))
 
     def test_winner_must_be_team_a_or_team_b(self):
-        other_sport = Sport.objects.create(name="Tennis")
+        other_sport = Sport.objects.create(name="Chess")
         outsider = Team.objects.create(name="Outsider", sport=other_sport)
         match = Match(**self.valid_kwargs(winner=outsider))
         with self.assertRaises(ValidationError) as ctx:
@@ -672,11 +866,20 @@ class MatchModelTests(TestCase):
         self.assertEqual(match.winner, self.team_a)
 
     def test_teams_must_belong_to_match_sport(self):
-        hockey = Sport.objects.create(name="Hockey")
-        blades = Team.objects.create(name="Blades", sport=hockey)
+        other_sport = Sport.objects.create(name="Netball")
+        blades = Team.objects.create(name="Blades", sport=other_sport)
         match = Match(**self.valid_kwargs(team_b=blades))
         with self.assertRaises(ValidationError):
             match.full_clean()
+
+    def test_points_fields_default_to_backwards_compatible_values(self):
+        match = Match(**self.valid_kwargs())
+        match.full_clean()
+        match.save()
+        self.assertEqual(match.team_a_win_points, 10)
+        self.assertEqual(match.team_a_lose_points, -5)
+        self.assertEqual(match.team_b_win_points, 10)
+        self.assertEqual(match.team_b_lose_points, -5)
 
     def test_deadline_cannot_be_after_kickoff(self):
         match = Match(
@@ -692,47 +895,162 @@ class MatchModelTests(TestCase):
 
 class SportModelTests(TestCase):
     def test_str_is_name(self):
-        self.assertEqual(str(Sport.objects.create(name="Football")), "Football")
+        self.assertEqual(str(Sport.objects.create(name="Rugby")), "Rugby")
 
     def test_name_must_be_unique_in_the_database(self):
-        Sport.objects.create(name="Football")
+        Sport.objects.create(name="Rugby")
         with self.assertRaises(IntegrityError):
-            Sport.objects.create(name="Football")
+            Sport.objects.create(name="Rugby")
 
     def test_duplicate_name_fails_full_clean(self):
-        Sport.objects.create(name="Football")
+        Sport.objects.create(name="Rugby")
         with self.assertRaises(ValidationError):
-            Sport(name="Football").full_clean()
+            Sport(name="Rugby").full_clean()
 
 
 class TeamModelTests(TestCase):
     def setUp(self):
-        self.football = Sport.objects.create(name="Football")
-        self.cricket = Sport.objects.create(name="Cricket")
+        self.sport_one = Sport.objects.create(name="Rugby")
+        self.sport_two = Sport.objects.create(name="Baseball")
 
     def test_str_is_name(self):
-        team = Team.objects.create(name="Lions", sport=self.football)
+        team = Team.objects.create(name="Lions", sport=self.sport_one)
         self.assertEqual(str(team), "Lions")
 
     def test_name_must_be_unique_per_sport(self):
-        Team.objects.create(name="Lions", sport=self.football)
+        Team.objects.create(name="Lions", sport=self.sport_one)
         with self.assertRaises(IntegrityError):
-            Team.objects.create(name="Lions", sport=self.football)
+            Team.objects.create(name="Lions", sport=self.sport_one)
 
     def test_same_name_allowed_in_a_different_sport(self):
-        Team.objects.create(name="Lions", sport=self.football)
-        Team.objects.create(name="Lions", sport=self.cricket)
+        Team.objects.create(name="Lions", sport=self.sport_one)
+        Team.objects.create(name="Lions", sport=self.sport_two)
         self.assertEqual(Team.objects.filter(name="Lions").count(), 2)
 
     def test_duplicate_per_sport_fails_full_clean(self):
-        Team.objects.create(name="Lions", sport=self.football)
+        Team.objects.create(name="Lions", sport=self.sport_one)
         with self.assertRaises(ValidationError):
-            Team(name="Lions", sport=self.football).full_clean()
+            Team(name="Lions", sport=self.sport_one).full_clean()
 
     def test_sport_is_protected_while_teams_exist(self):
-        Team.objects.create(name="Lions", sport=self.football)
+        Team.objects.create(name="Lions", sport=self.sport_one)
         with self.assertRaises(ProtectedError):
-            self.football.delete()
+            self.sport_one.delete()
+
+
+class TeamFlagModelAndTagTests(MediaIsolatedTestCase):
+    def setUp(self):
+        self.sport = Sport.objects.create(name="Rugby")
+
+    def test_flag_is_optional_and_falsy_by_default(self):
+        team = Team.objects.create(name="Lions", sport=self.sport)
+        self.assertFalse(team.flag)
+
+    def test_team_can_store_an_uploaded_flag(self):
+        team = Team.objects.create(name="Lions", sport=self.sport, flag=make_flag())
+        team.refresh_from_db()
+        self.assertTrue(team.flag)
+        self.assertIn("team_flags/", team.flag.name)
+
+    def test_team_flag_tag_renders_nothing_when_no_flag(self):
+        team = Team.objects.create(name="Tigers", sport=self.sport)
+        self.assertEqual(team_flag(team), "")
+
+    def test_team_flag_tag_renders_nothing_for_none_team(self):
+        self.assertEqual(team_flag(None), "")
+
+    def test_team_flag_tag_renders_img_with_url_and_css_class(self):
+        team = Team.objects.create(name="Lions", sport=self.sport, flag=make_flag())
+        html = team_flag(team)
+        self.assertIn("<img", html)
+        self.assertIn(team.flag.url, html)
+        self.assertIn('class="team-flag"', html)
+        self.assertIn("Lions flag", html)
+
+
+class TeamFlagRenderingTests(MediaIsolatedTestCase):
+    """Flags belong to the team, so the same upload must show up on every
+    page that mentions that team, and a flagless team must render its name
+    with no broken <img>."""
+
+    def setUp(self):
+        # Homepage ("/") shows only the Football sport page, so these
+        # cross-page rendering checks must use the real seeded Football sport.
+        self.sport = Sport.objects.get(name="Football")
+        self.team_a = Team.objects.create(
+            name="Lions", sport=self.sport, flag=make_flag("a.png")
+        )
+        self.team_b = Team.objects.create(name="Tigers", sport=self.sport)
+        self.match = future_match(
+            sport=self.sport, team_a=self.team_a, team_b=self.team_b
+        )
+
+    def test_homepage_shows_flag_and_no_broken_image_for_flagless_team(self):
+        response = self.client.get(reverse("match_list"))
+        content = response.content.decode()
+        self.assertIn(self.team_a.flag.url, content)
+        self.assertContains(response, "Tigers")
+        self.assertNotIn("Tigers flag", content)
+
+    def test_match_detail_shows_flag_and_no_broken_image_for_flagless_team(self):
+        response = self.client.get(reverse("match_detail", args=[self.match.pk]))
+        content = response.content.decode()
+        self.assertIn(self.team_a.flag.url, content)
+        self.assertNotIn("Tigers flag", content)
+
+    def test_my_predictions_shows_flag_and_no_broken_image_for_flagless_team(self):
+        user = User.objects.create_user("alice", password="pass12345")
+        Prediction.objects.create(user=user, match=self.match, choice="A")
+        self.client.login(username="alice", password="pass12345")
+
+        response = self.client.get(reverse("my_predictions"))
+        content = response.content.decode()
+        self.assertIn(self.team_a.flag.url, content)
+        self.assertNotIn("Tigers flag", content)
+
+    def test_same_uploaded_flag_appears_in_every_match_for_that_team(self):
+        other_match = future_match(
+            sport=self.sport,
+            team_a=self.team_a,
+            team_b=Team.objects.create(name="Bears", sport=self.sport),
+        )
+        response = self.client.get(reverse("match_list"))
+        content = response.content.decode()
+        # Each match card renders team_a's flag twice (title + pick panel);
+        # team_a appears in two open matches here.
+        self.assertEqual(content.count(self.team_a.flag.url), 4)
+
+
+class TeamAdminFlagTests(MediaIsolatedTestCase):
+    def setUp(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
+        self.sport = Sport.objects.create(name="Rugby")
+
+    def test_add_form_exposes_flag_upload_field(self):
+        response = self.client.get(reverse("admin:predictions_team_add"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'name="flag"')
+        self.assertContains(response, 'type="file"')
+
+    def test_admin_can_upload_a_flag_when_creating_a_team(self):
+        response = self.client.post(
+            reverse("admin:predictions_team_add"),
+            {"name": "Lions", "sport": self.sport.pk, "flag": make_flag()},
+        )
+        self.assertEqual(response.status_code, 302)
+        team = Team.objects.get(name="Lions")
+        self.assertTrue(team.flag)
+
+    def test_changelist_shows_placeholder_when_flag_missing(self):
+        Team.objects.create(name="Tigers", sport=self.sport)
+        response = self.client.get(reverse("admin:predictions_team_changelist"))
+        self.assertContains(response, "no flag uploaded")
+
+    def test_changelist_shows_flag_preview_image_when_present(self):
+        team = Team.objects.create(name="Lions", sport=self.sport, flag=make_flag())
+        response = self.client.get(reverse("admin:predictions_team_changelist"))
+        self.assertContains(response, team.flag.url)
 
 
 class MyPredictionsViewTests(TestCase):
@@ -1000,7 +1318,13 @@ class MatchDetailViewTests(TestCase):
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
     def test_match_list_links_to_detail_page(self):
-        match = self._match("linked")
+        # The homepage only shows Football matches, so this one must be Football.
+        football = Sport.objects.get(name="Football")
+        match = future_match(
+            sport=football,
+            team_a=Team.objects.create(name="A linked", sport=football),
+            team_b=Team.objects.create(name="B linked", sport=football),
+        )
         response = self.client.get(reverse("match_list"))
         self.assertContains(response, reverse("match_detail", args=[match.pk]))
 
@@ -1023,12 +1347,19 @@ class LeaderboardViewTests(TestCase):
         stop = body.index("</tr>", at)
         return body[start:stop]
 
+    @staticmethod
+    def _visible_text_tokens(row):
+        """Row markup with all tags stripped, split into whitespace-delimited
+        tokens -- lets a Points-cell assertion ignore whatever medal <img>
+        markup does or doesn't precede the number."""
+        return re.sub(r"<[^>]+>", " ", row).split()
+
     def test_orders_by_points_highest_first_with_matching_ranks(self):
         self._user("carol", points=30)
         self._user("alice", points=10)
         self._user("bob", points=-5)
 
-        response = self.client.get(reverse("leaderboard"))
+        response = self.client.get(reverse("leaderboard_all_time"))
 
         profiles = list(response.context["profiles"])
         self.assertEqual(
@@ -1046,7 +1377,7 @@ class LeaderboardViewTests(TestCase):
         self._user("zoe", points=15)
         self._user("amy", points=15)
 
-        response = self.client.get(reverse("leaderboard"))
+        response = self.client.get(reverse("leaderboard_all_time"))
 
         profiles = list(response.context["profiles"])
         self.assertEqual([p.user.username for p in profiles], ["amy", "zoe"])
@@ -1058,7 +1389,7 @@ class LeaderboardViewTests(TestCase):
         self._user("bob", points=20)
         self.client.login(username="alice", password="pass12345")
 
-        response = self.client.get(reverse("leaderboard"))
+        response = self.client.get(reverse("leaderboard_all_time"))
         content = response.content.decode()
 
         self.assertIn("table-warning", self._row_for(content, "alice"))
@@ -1068,7 +1399,7 @@ class LeaderboardViewTests(TestCase):
         self._user("alice", points=10)
         self._user("bob", points=20)
 
-        response = self.client.get(reverse("leaderboard"))
+        response = self.client.get(reverse("leaderboard_all_time"))
 
         self.assertNotContains(response, "table-warning")
 
@@ -1083,7 +1414,7 @@ class LeaderboardViewTests(TestCase):
         match.save()
         self.assertTrue(score_match(match.pk))
 
-        response = self.client.get(reverse("leaderboard"))
+        response = self.client.get(reverse("leaderboard_all_time"))
 
         profiles = list(response.context["profiles"])
         self.assertEqual(
@@ -1092,21 +1423,256 @@ class LeaderboardViewTests(TestCase):
         )
         content = response.content.decode()
         self.assertLess(content.index("winner"), content.index("loser"))
-        self.assertIn(f"<td>{POINTS_CORRECT}</td>", self._row_for(content, "winner"))
-        self.assertIn(f"<td>{POINTS_WRONG}</td>", self._row_for(content, "loser"))
-
-
-class MatchListViewTests(TestCase):
-    """Hardening for the match_list view + templates/predictions/match_list.html."""
-
-    def _match(self, label, **kwargs):
-        sport = Sport.objects.create(name=f"Sport {label}")
-        return future_match(
-            sport=sport,
-            team_a=Team.objects.create(name=f"A {label}", sport=sport),
-            team_b=Team.objects.create(name=f"B {label}", sport=sport),
-            **kwargs,
+        self.assertIn(
+            str(POINTS_CORRECT),
+            self._visible_text_tokens(self._row_for(content, "winner")),
         )
+        self.assertIn(
+            str(POINTS_WRONG),
+            self._visible_text_tokens(self._row_for(content, "loser")),
+        )
+
+    def test_legacy_profile_with_no_location_shows_em_dash(self):
+        self._user("alice", points=10)
+
+        response = self.client.get(reverse("leaderboard_all_time"))
+        content = response.content.decode()
+
+        self.assertIn("—", self._row_for(content, "alice"))
+
+    def test_registered_user_shows_state_and_country(self):
+        self.client.post(
+            reverse("register"),
+            registration_data(username="arunkumar", country="India", state="Kerala"),
+        )
+        self.client.logout()
+
+        response = self.client.get(reverse("leaderboard_all_time"))
+        content = response.content.decode()
+
+        row = self._row_for(content, "arunkumar")
+        self.assertIn("Kerala", row)
+        self.assertIn("India", row)
+
+
+class MonthlyLeaderboardTests(TestCase):
+    """The monthly board sums ScoreAdjustment rows created this month --
+    never Profile.points directly -- so re-scoring can't double-count."""
+
+    def _user(self, username):
+        return User.objects.create_user(username, password="pass12345")
+
+    def _points(self, user):
+        user.profile.refresh_from_db()
+        return user.profile.points
+
+    def _monthly_totals(self):
+        response = self.client.get(reverse("leaderboard_monthly"))
+        return {p.user.username: p.monthly_points for p in response.context["profiles"]}
+
+    def test_monthly_total_matches_this_months_scoring(self):
+        alice = self._user("alice")
+        bob = self._user("bob")
+        match = future_match()
+        Prediction.objects.create(user=alice, match=match, choice="A")
+        Prediction.objects.create(user=bob, match=match, choice="B")
+
+        match.winner = match.team_a
+        match.save()
+        self.assertTrue(score_match(match.pk))
+
+        totals = self._monthly_totals()
+        self.assertEqual(totals["alice"], POINTS_CORRECT)
+        self.assertEqual(totals["bob"], POINTS_WRONG)
+
+    def test_rescoring_same_winner_does_not_double_count(self):
+        alice = self._user("alice")
+        match = future_match()
+        Prediction.objects.create(user=alice, match=match, choice="A")
+        match.winner = match.team_a
+        match.save()
+
+        self.assertTrue(score_match(match.pk))
+        self.assertFalse(score_match(match.pk))
+        self.assertFalse(score_match(match.pk))
+
+        self.assertEqual(self._monthly_totals()["alice"], POINTS_CORRECT)
+
+    def test_winner_correction_adjusts_monthly_total_without_double_counting(self):
+        alice = self._user("alice")
+        bob = self._user("bob")
+        match = future_match()
+        Prediction.objects.create(user=alice, match=match, choice="A")
+        Prediction.objects.create(user=bob, match=match, choice="B")
+
+        match.winner = match.team_a
+        match.save()
+        score_match(match.pk)
+
+        match.refresh_from_db()
+        match.winner = match.team_b
+        match.save()
+        score_match(match.pk)
+
+        totals = self._monthly_totals()
+        # Net for this month: alice went from correct to incorrect, bob the reverse.
+        self.assertEqual(totals["alice"], POINTS_WRONG)
+        self.assertEqual(totals["bob"], POINTS_CORRECT)
+        # All-time Profile.points agrees too, since it all happened this month.
+        self.assertEqual(self._points(alice), POINTS_WRONG)
+        self.assertEqual(self._points(bob), POINTS_CORRECT)
+
+    def test_clearing_winner_zeroes_out_the_monthly_total(self):
+        alice = self._user("alice")
+        match = future_match()
+        Prediction.objects.create(user=alice, match=match, choice="A")
+        match.winner = match.team_a
+        match.save()
+        score_match(match.pk)
+
+        match.refresh_from_db()
+        match.winner = None
+        match.save()
+        score_match(match.pk)
+
+        self.assertEqual(self._monthly_totals()["alice"], 0)
+
+    def test_adjustment_dated_last_month_does_not_count_this_month(self):
+        alice = self._user("alice")
+        match = future_match()
+        Prediction.objects.create(user=alice, match=match, choice="A")
+        match.winner = match.team_a
+        match.save()
+        score_match(match.pk)
+
+        # Backdate the ledger row, as if this scoring had actually run last month.
+        ScoreAdjustment.objects.filter(user=alice, match=match).update(
+            created_at=timezone.now() - timedelta(days=40)
+        )
+
+        self.assertEqual(self._monthly_totals().get("alice", 0), 0)
+        # All-time points are unaffected by which month the ledger row is dated.
+        self.assertEqual(self._points(alice), POINTS_CORRECT)
+
+    def test_profile_with_no_activity_this_month_shows_zero(self):
+        self._user("carol")
+        self.assertEqual(self._monthly_totals()["carol"], 0)
+
+    def test_monthly_leaderboard_shows_location_columns(self):
+        self.client.post(
+            reverse("register"),
+            registration_data(username="arunkumar", country="India", state="Kerala"),
+        )
+        self.client.logout()
+
+        response = self.client.get(reverse("leaderboard_monthly"))
+        content = response.content.decode()
+
+        self.assertIn("Kerala", content)
+        self.assertIn("India", content)
+
+
+class LeaderboardMedalTests(TestCase):
+    """Gold/silver/bronze medal images next to the top three rows only."""
+
+    @staticmethod
+    def _row_for(content, username):
+        body = content[content.index("<tbody>"):content.index("</tbody>")]
+        at = body.index(f"<td>{username}</td>")
+        start = body.rindex("<tr", 0, at)
+        stop = body.index("</tr>", at)
+        return body[start:stop]
+
+    def _assert_medal(self, row, filename, alt_text):
+        self.assertIn(filename, row)
+        self.assertIn(f'alt="{alt_text}"', row)
+        self.assertIn("medal-icon", row)
+
+    def _assert_no_medal(self, row):
+        self.assertNotIn("medal-icon", row)
+        self.assertNotIn("gold.svg", row)
+        self.assertNotIn("silver.svg", row)
+        self.assertNotIn("bronze.svg", row)
+
+    def test_all_time_leaderboard_shows_medals_only_for_top_three(self):
+        for index in range(4):
+            user = User.objects.create_user(f"player{index}", password="pass12345")
+            Profile.objects.filter(user=user).update(points=100 - index * 10)
+
+        response = self.client.get(reverse("leaderboard_all_time"))
+        content = response.content.decode()
+
+        self._assert_medal(
+            self._row_for(content, "player0"),
+            "gold.svg",
+            "Gold medal — first place",
+        )
+        self._assert_medal(
+            self._row_for(content, "player1"),
+            "silver.svg",
+            "Silver medal — second place",
+        )
+        self._assert_medal(
+            self._row_for(content, "player2"),
+            "bronze.svg",
+            "Bronze medal — third place",
+        )
+        self._assert_no_medal(self._row_for(content, "player3"))
+
+    def test_monthly_leaderboard_shows_medals_only_for_top_three(self):
+        users = [
+            User.objects.create_user(f"m{index}", password="pass12345")
+            for index in range(4)
+        ]
+        match = future_match()
+        for user, delta in zip(users, (40, 30, 20, 10)):
+            ScoreAdjustment.objects.create(user=user, match=match, delta=delta)
+
+        response = self.client.get(reverse("leaderboard_monthly"))
+        content = response.content.decode()
+
+        self._assert_medal(
+            self._row_for(content, "m0"), "gold.svg", "Gold medal — first place"
+        )
+        self._assert_medal(
+            self._row_for(content, "m1"), "silver.svg", "Silver medal — second place"
+        )
+        self._assert_medal(
+            self._row_for(content, "m2"), "bronze.svg", "Bronze medal — third place"
+        )
+        self._assert_no_medal(self._row_for(content, "m3"))
+
+    def test_fewer_than_three_players_shows_no_missing_medal_errors(self):
+        user = User.objects.create_user("solo", password="pass12345")
+        Profile.objects.filter(user=user).update(points=5)
+
+        response = self.client.get(reverse("leaderboard_all_time"))
+
+        self.assertEqual(response.status_code, 200)
+        self._assert_medal(
+            self._row_for(response.content.decode(), "solo"),
+            "gold.svg",
+            "Gold medal — first place",
+        )
+
+
+def sport_match(sport_name, team_a_name="Team A", team_b_name="Team B", **kwargs):
+    """A future_match() pinned to one of the four seeded public sports."""
+    sport = Sport.objects.get(name=sport_name)
+    team_a = kwargs.pop("team_a", None) or Team.objects.create(
+        name=team_a_name, sport=sport
+    )
+    team_b = kwargs.pop("team_b", None) or Team.objects.create(
+        name=team_b_name, sport=sport
+    )
+    return future_match(sport=sport, team_a=team_a, team_b=team_b, **kwargs)
+
+
+class SportMatchesViewTests(TestCase):
+    """Hardening for the sport_matches view + templates/predictions/sport_matches.html.
+
+    The homepage ("/") simply renders the Football page, so it is covered here too.
+    """
 
     def _past_deadline_kwargs(self):
         now = timezone.now()
@@ -1115,106 +1681,445 @@ class MatchListViewTests(TestCase):
             "prediction_deadline": now - timedelta(hours=1),
         }
 
-    def test_published_match_is_visible_and_unpublished_is_not(self):
-        self._match("shown")
-        self._match("hidden", is_published=False)
-
+    def test_homepage_renders_the_football_page(self):
         response = self.client.get(reverse("match_list"))
+        self.assertEqual(response.status_code, 200)
+        self.assertTemplateUsed(response, "predictions/sport_matches.html")
+        self.assertEqual(response.context["sport_name"], "Football")
+
+    def test_unknown_sport_slug_is_404(self):
+        response = self.client.get(reverse("sport_matches", args=["darts"]))
+        self.assertEqual(response.status_code, 404)
+
+    def test_each_supported_sport_has_a_working_page(self):
+        for name in SUPPORTED_SPORTS:
+            response = self.client.get(reverse("sport_matches", args=[name.lower()]))
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.context["sport_name"], name)
+
+    def test_published_match_is_visible_and_unpublished_is_not(self):
+        sport_match("Football", "A shown", "B shown")
+        sport_match("Football", "A hidden", "B hidden", is_published=False)
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
 
         self.assertContains(response, "A shown")
         self.assertNotContains(response, "A hidden")
 
-    def test_future_match_is_open_past_deadline_match_is_closed(self):
-        open_match = self._match("open")
-        closed_match = self._match("closed", **self._past_deadline_kwargs())
+    def test_only_open_matches_of_the_selected_sport_appear(self):
+        football_open = sport_match("Football", "FA open", "FB open")
+        football_closed = sport_match(
+            "Football", "FA closed", "FB closed", **self._past_deadline_kwargs()
+        )
+        cricket_open = sport_match("Cricket", "CA open", "CB open")
 
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+        shown_ids = [m.id for m in response.context["open_matches"]]
+
+        self.assertIn(football_open.id, shown_ids)
+        self.assertNotIn(football_closed.id, shown_ids)
+        self.assertNotIn(cricket_open.id, shown_ids)
+        self.assertContains(response, "FA open")
+        self.assertNotContains(response, "FA closed")
+        self.assertNotContains(response, "CA open")
+
+    def test_closed_matches_are_not_shown_on_sport_pages(self):
+        sport_match("Football", "FA gone", "FB gone", **self._past_deadline_kwargs())
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+
+        self.assertNotContains(response, "FA gone")
+
+    def test_scored_match_no_longer_appears_on_sport_page(self):
+        match = sport_match("Football", "FA scored", "FB scored")
+        match.winner = match.team_a
+        match.save()
+        self.assertTrue(score_match(match.pk))
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+
+        self.assertNotContains(response, "FA scored")
+
+    def test_authenticated_user_sees_their_selected_team_highlighted(self):
+        match = sport_match("Football", "FA pick", "FB pick")
+        user = User.objects.create_user("alice", password="pass12345")
+        Prediction.objects.create(user=user, match=match, choice="A")
+        self.client.login(username="alice", password="pass12345")
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+
+        self.assertContains(response, "Predicted")
+        self.assertContains(response, "Win:")
+        self.assertContains(response, "Lose:")
+
+    def test_open_match_shows_predict_the_win_label(self):
+        sport_match("Cricket", "CA cta", "CB cta")
+
+        response = self.client.get(reverse("sport_matches", args=["cricket"]))
+
+        self.assertContains(response, "Predict the Win")
+
+    def test_open_match_shows_team_win_lose_points(self):
+        match = sport_match("Tennis", "TA points", "TB points")
+        match.team_a_win_points = 20
+        match.team_a_lose_points = -8
+        match.team_b_win_points = 15
+        match.team_b_lose_points = -3
+        match.save()
+
+        response = self.client.get(reverse("sport_matches", args=["tennis"]))
+
+        self.assertContains(response, "Win: 20")
+        self.assertContains(response, "Lose: -8")
+        self.assertContains(response, "Win: 15")
+        self.assertContains(response, "Lose: -3")
+
+    def test_authenticated_user_can_predict_directly_from_a_sport_page(self):
+        match = sport_match("Badminton", "BA inline", "BB inline")
+        user = User.objects.create_user("alice", password="pass12345")
+        self.client.login(username="alice", password="pass12345")
+
+        page = self.client.get(reverse("sport_matches", args=["badminton"]))
+        # The sport page renders a form that posts straight to the predict
+        # endpoint -- no separate predict page needs to be opened.
+        self.assertContains(page, 'action="%s"' % reverse("predict", args=[match.pk]))
+
+        response = self.client.post(
+            reverse("predict", args=[match.pk]), {"choice": "B"}
+        )
+        # Predicting on a Badminton match returns to the Badminton page, not Football.
+        self.assertRedirects(response, reverse("sport_matches", args=["badminton"]))
+
+        pick = Prediction.objects.get(user=user, match=match)
+        self.assertEqual(pick.choice, "B")
+
+        after = self.client.get(reverse("sport_matches", args=["badminton"]))
+        self.assertContains(after, "Predicted")
+
+    def test_guest_does_not_see_predict_forms(self):
+        sport_match("Football", "FA guest-forms", "FB guest-forms")
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+
+        self.assertNotContains(response, "<form")
+        self.assertContains(response, "Win:")
+        self.assertContains(response, "Lose:")
+
+    def test_guest_sees_login_to_predict_and_not_the_predict_link(self):
+        match = sport_match("Football", "FA guest", "FB guest")
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+
+        self.assertContains(response, "Log in to predict")
+        self.assertNotContains(response, reverse("predict", args=[match.pk]))
+
+    def test_empty_state_message_names_the_sport(self):
+        response = self.client.get(reverse("sport_matches", args=["tennis"]))
+        self.assertContains(response, "No upcoming Tennis matches")
+
+    def test_event_name_shown_below_predict_the_win(self):
+        sport_match("Football", "FA event", "FB event", event_name="World Cup")
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+        content = response.content.decode()
+
+        self.assertIn("World Cup", content)
+        self.assertLess(content.index("Predict the Win"), content.index("World Cup"))
+
+    def test_blank_event_name_shows_no_empty_label_or_spacing(self):
+        sport_match("Football", "FA noevent", "FB noevent")
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '<div class="small text-muted"></div>')
+
+
+class ClosedMatchesViewTests(TestCase):
+    """Hardening for the closed_matches view + templates/predictions/closed_matches.html."""
+
+    def _past_deadline_kwargs(self):
+        now = timezone.now()
+        return {
+            "start_time": now - timedelta(minutes=5),
+            "prediction_deadline": now - timedelta(hours=1),
+        }
+
+    def test_open_match_is_excluded(self):
+        sport_match("Football", "FA open", "FB open")
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertNotContains(response, "FA open")
+
+    def test_unpublished_match_is_excluded(self):
+        sport_match(
+            "Football",
+            "FA hidden",
+            "FB hidden",
+            is_published=False,
+            **self._past_deadline_kwargs(),
+        )
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertNotContains(response, "FA hidden")
+
+    def test_deadline_passed_match_is_shown(self):
+        sport_match("Cricket", "CA locked", "CB locked", **self._past_deadline_kwargs())
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertContains(response, "CA locked")
+        self.assertContains(response, "Predictions locked. Winner not entered yet.")
+
+    def test_finished_scored_match_is_shown_with_winner_and_scored_badge(self):
+        match = sport_match("Tennis", "TA scored", "TB scored")
+        match.winner = match.team_a
+        match.save()
+        self.assertTrue(score_match(match.pk))
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertContains(response, "TA scored")
+        self.assertContains(response, "Winner:")
+        self.assertContains(response, "Scored")
+
+    def test_cancelled_match_is_shown(self):
+        sport_match(
+            "Badminton", "BA cancelled", "BB cancelled", status=Match.Status.CANCELLED
+        )
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertContains(response, "Cancelled")
+        self.assertContains(response, "no result will be recorded")
+
+    def test_live_match_is_shown(self):
+        sport_match("Football", "FA live", "FB live", status=Match.Status.LIVE)
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertContains(response, "Live")
+        self.assertContains(response, "in progress")
+
+    def test_shows_matches_from_every_supported_sport(self):
+        sport_match("Cricket", "CA multi", "CB multi", **self._past_deadline_kwargs())
+        sport_match("Tennis", "TA multi", "TB multi", **self._past_deadline_kwargs())
+        sport_match(
+            "Badminton", "BA multi", "BB multi", **self._past_deadline_kwargs()
+        )
+        sport_match("Hockey", "HA multi", "HB multi", **self._past_deadline_kwargs())
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertContains(response, "CA multi")
+        self.assertContains(response, "TA multi")
+        self.assertContains(response, "BA multi")
+        self.assertContains(response, "HA multi")
+
+    def test_empty_state(self):
+        response = self.client.get(reverse("closed_matches"))
+        self.assertContains(response, "No closed matches yet.")
+
+    def test_event_name_shown_on_closed_match_card(self):
+        sport_match(
+            "Football",
+            "FA wc",
+            "FB wc",
+            event_name="World Cup",
+            **self._past_deadline_kwargs(),
+        )
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertContains(response, "World Cup")
+
+    def test_blank_event_name_shows_no_empty_label_or_spacing(self):
+        sport_match("Football", "FA noevent2", "FB noevent2", **self._past_deadline_kwargs())
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertNotContains(response, '<div class="small text-muted"></div>')
+
+
+class PublicNavTests(TestCase):
+    def test_navbar_lists_every_public_menu_item(self):
         response = self.client.get(reverse("match_list"))
 
-        open_ids = [m.id for m in response.context["open_matches"]]
-        closed_ids = [m.id for m in response.context["closed_matches"]]
-        self.assertIn(open_match.id, open_ids)
-        self.assertNotIn(open_match.id, closed_ids)
-        self.assertIn(closed_match.id, closed_ids)
-        self.assertNotIn(closed_match.id, open_ids)
+        for label in SUPPORTED_SPORTS + ["Closed Matches"]:
+            self.assertContains(response, label)
+        for name in SUPPORTED_SPORTS:
+            self.assertContains(response, reverse("sport_matches", args=[name.lower()]))
+        self.assertContains(response, reverse("closed_matches"))
 
-    def test_scored_match_shows_winner_and_scored_badge(self):
-        match = self._match("scored")
+    def test_old_generic_brand_and_matches_link_are_gone(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertNotContains(response, 'class="navbar-brand"')
+
+    def test_predict_now_badge_shown_only_for_sports_with_an_open_match(self):
+        sport_match("Football", "PN A", "PN B")
+
+        response = self.client.get(reverse("match_list"))
+        content = response.content.decode()
+
+        football_link = content[content.index('href="/sport/football/"'):]
+        football_link = football_link[: football_link.index("</a>")]
+        self.assertIn("Predict now", football_link)
+
+        cricket_link = content[content.index('href="/sport/cricket/"'):]
+        cricket_link = cricket_link[: cricket_link.index("</a>")]
+        self.assertNotIn("Predict now", cricket_link)
+
+    def test_predict_now_badge_hidden_when_no_sport_has_open_matches(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertNotContains(response, "Predict now")
+
+    def test_predict_now_badge_disappears_once_the_only_open_match_is_scored(self):
+        match = sport_match("Tennis", "PN scored A", "PN scored B")
+        response = self.client.get(reverse("match_list"))
+        self.assertIn("Predict now", response.content.decode())
+
         match.winner = match.team_a
         match.save()
         self.assertTrue(score_match(match.pk))
 
         response = self.client.get(reverse("match_list"))
+        tennis_link = response.content.decode()
+        tennis_link = tennis_link[tennis_link.index('href="/sport/tennis/"'):]
+        tennis_link = tennis_link[: tennis_link.index("</a>")]
+        self.assertNotIn("Predict now", tennis_link)
 
-        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
-        self.assertContains(response, "Winner:")
-        self.assertContains(response, str(match.team_a))
-        self.assertContains(response, "Scored")
 
-    def test_locked_match_without_winner_shows_awaiting_message_and_no_scored(self):
-        match = self._match("locked", **self._past_deadline_kwargs())
+class DefaultSportsDataMigrationTests(TestCase):
+    def test_all_supported_sports_exist(self):
+        names = set(Sport.objects.values_list("name", flat=True))
+        for expected in SUPPORTED_SPORTS:
+            self.assertIn(expected, names)
 
+
+class HockeySportTests(TestCase):
+    """Hockey was added alongside Football/Cricket/Tennis/Badminton."""
+
+    def test_hockey_sport_exists(self):
+        self.assertTrue(Sport.objects.filter(name="Hockey").exists())
+
+    def test_hockey_is_in_the_public_sports_menu(self):
         response = self.client.get(reverse("match_list"))
+        self.assertContains(response, "Hockey")
+        self.assertContains(response, reverse("sport_matches", args=["hockey"]))
 
-        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
-        self.assertContains(response, "Predictions locked. Winner not entered yet.")
-        self.assertNotContains(response, "Scored")
+    def test_hockey_sport_page_works_and_shows_only_open_hockey_matches(self):
+        hockey_open = sport_match("Hockey", "HA open", "HB open")
+        hockey_closed = sport_match(
+            "Hockey",
+            "HA closed",
+            "HB closed",
+            start_time=timezone.now() - timedelta(minutes=5),
+            prediction_deadline=timezone.now() - timedelta(hours=1),
+        )
+        football_open = sport_match("Football", "FA open", "FB open")
 
-    def test_cancelled_match_is_closed_not_open(self):
-        # Documents current behaviour: a cancelled match drops out of "open"
-        # and lands in "closed" with no cancelled-specific label in the list.
-        match = self._match("cancelled", status=Match.Status.CANCELLED)
+        response = self.client.get(reverse("sport_matches", args=["hockey"]))
 
-        response = self.client.get(reverse("match_list"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.context["sport_name"], "Hockey")
+        shown_ids = [m.id for m in response.context["open_matches"]]
+        self.assertIn(hockey_open.id, shown_ids)
+        self.assertNotIn(hockey_closed.id, shown_ids)
+        self.assertNotIn(football_open.id, shown_ids)
 
-        self.assertNotIn(match.id, [m.id for m in response.context["open_matches"]])
-        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
+    def test_hockey_match_is_included_in_closed_matches(self):
+        sport_match(
+            "Hockey",
+            "HA locked",
+            "HB locked",
+            start_time=timezone.now() - timedelta(minutes=5),
+            prediction_deadline=timezone.now() - timedelta(hours=1),
+        )
+        response = self.client.get(reverse("closed_matches"))
+        self.assertContains(response, "HA locked")
 
-    def test_cancelled_match_shows_cancelled_status_not_awaiting_winner(self):
-        match = self._match("cancelled-ui", status=Match.Status.CANCELLED)
+    def test_hockey_team_can_be_created_in_admin(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
+        hockey = Sport.objects.get(name="Hockey")
 
-        response = self.client.get(reverse("match_list"))
+        response = self.client.post(
+            reverse("admin:predictions_team_add"),
+            {"name": "Panthers", "sport": hockey.pk},
+        )
 
-        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
-        self.assertContains(response, "Cancelled")
-        self.assertContains(response, "no result will be recorded")
-        self.assertNotContains(response, "Winner not entered yet.")
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(Team.objects.filter(name="Panthers", sport=hockey).exists())
 
-    def test_live_match_shows_live_status_not_awaiting_winner(self):
-        match = self._match("live-ui", status=Match.Status.LIVE)
+    def test_hockey_appears_in_the_sport_autocomplete_used_by_team_and_match_admin(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
 
-        response = self.client.get(reverse("match_list"))
+        response = self.client.get(
+            reverse("admin:autocomplete"),
+            {
+                "app_label": "predictions",
+                "model_name": "team",
+                "field_name": "sport",
+                "term": "Hockey",
+            },
+        )
 
-        self.assertIn(match.id, [m.id for m in response.context["closed_matches"]])
-        self.assertContains(response, "Live")
-        self.assertContains(response, "in progress")
-        self.assertNotContains(response, "Winner not entered yet.")
+        self.assertEqual(response.status_code, 200)
+        names = [row["text"] for row in response.json()["results"]]
+        self.assertIn("Hockey", names)
 
-    def test_authenticated_user_sees_their_pick_and_change_label(self):
-        match = self._match("pick")
-        user = User.objects.create_user("alice", password="pass12345")
-        Prediction.objects.create(user=user, match=match, choice="A")
-        self.client.login(username="alice", password="pass12345")
+    def test_hockey_match_can_be_created_in_admin(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
+        hockey = Sport.objects.get(name="Hockey")
+        team_a = Team.objects.create(name="Panthers", sport=hockey)
+        team_b = Team.objects.create(name="Wolves", sport=hockey)
+        now = timezone.now()
 
-        response = self.client.get(reverse("match_list"))
+        response = self.client.post(
+            reverse("admin:predictions_match_add"),
+            {
+                "sport": hockey.pk,
+                "event_name": "",
+                "team_a": team_a.pk,
+                "team_b": team_b.pk,
+                "start_time_0": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "start_time_1": "12:00:00",
+                "prediction_deadline_0": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "prediction_deadline_1": "11:00:00",
+                "status": Match.Status.SCHEDULED,
+                "is_published": "on",
+                "team_a_win_points": 10,
+                "team_a_lose_points": -5,
+                "team_b_win_points": 10,
+                "team_b_lose_points": -5,
+            },
+        )
 
-        self.assertContains(response, "Your pick")
-        self.assertContains(response, "Change pick")
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(
+            Match.objects.filter(sport=hockey, team_a=team_a, team_b=team_b).exists()
+        )
 
-    def test_guest_sees_login_to_predict_and_not_the_predict_link(self):
-        match = self._match("guest")
 
-        response = self.client.get(reverse("match_list"))
+class EventNameTests(TestCase):
+    def test_event_name_defaults_to_blank(self):
+        match = future_match()
+        self.assertEqual(match.event_name, "")
 
-        self.assertContains(response, "Log in to predict")
-        self.assertNotContains(response, reverse("predict", args=[match.pk]))
+    def test_event_name_shown_on_match_detail_page(self):
+        match = sport_match("Football", "FA detail", "FB detail", event_name="Euro Cup")
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertContains(response, "Euro Cup")
 
-    def test_closed_section_empty_state(self):
-        self._match("only-open")
-
-        response = self.client.get(reverse("match_list"))
-
-        self.assertEqual(response.context["closed_matches"], [])
-        self.assertContains(response, "No closed matches yet.")
+    def test_blank_event_name_not_shown_on_match_detail_page(self):
+        match = sport_match("Football", "FA detail2", "FB detail2")
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertNotContains(response, '<dt class="col-sm-3">Event</dt>')
 
 
 class MatchAdminActionTests(TestCase):
@@ -1241,6 +2146,43 @@ class MatchAdminActionTests(TestCase):
         )
         self.match.refresh_from_db()
         self.assertFalse(self.match.is_published)
+
+    def test_add_form_exposes_all_four_points_fields(self):
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        self.assertEqual(response.status_code, 200)
+        for field in (
+            "team_a_win_points",
+            "team_a_lose_points",
+            "team_b_win_points",
+            "team_b_lose_points",
+        ):
+            self.assertContains(response, field)
+
+    def test_change_form_exposes_all_four_points_fields(self):
+        response = self.client.get(
+            reverse("admin:predictions_match_change", args=[self.match.pk])
+        )
+        self.assertEqual(response.status_code, 200)
+        for field in (
+            "team_a_win_points",
+            "team_a_lose_points",
+            "team_b_win_points",
+            "team_b_lose_points",
+        ):
+            self.assertContains(response, field)
+
+    def test_add_form_exposes_event_name_field_with_help_text(self):
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'name="event_name"')
+        self.assertContains(response, "World Cup, Euro Cup, Wimbledon")
+
+    def test_change_form_exposes_event_name_field(self):
+        response = self.client.get(
+            reverse("admin:predictions_match_change", args=[self.match.pk])
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, 'name="event_name"')
 
 
 class SettingsSecurityTests(SimpleTestCase):

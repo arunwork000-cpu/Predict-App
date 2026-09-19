@@ -11,6 +11,11 @@ class Profile(models.Model):
         related_name="profile",
     )
     points = models.IntegerField(default=0)
+    # Blank for legacy accounts created before this field existed, and for
+    # any account created outside the registration form (e.g. createsuperuser).
+    # Required at signup; enforced by RegistrationForm, not here.
+    country = models.CharField(max_length=100, blank=True, default="")
+    state = models.CharField(max_length=100, blank=True, default="")
 
     class Meta:
         ordering = ["-points", "user__username"]
@@ -32,6 +37,12 @@ class Sport(models.Model):
 class Team(models.Model):
     name = models.CharField(max_length=100)
     sport = models.ForeignKey(Sport, on_delete=models.PROTECT, related_name="teams")
+    flag = models.ImageField(
+        upload_to="team_flags/",
+        null=True,
+        blank=True,
+        help_text="Optional flag/logo shown next to the team name.",
+    )
 
     class Meta:
         ordering = ["name"]
@@ -54,6 +65,12 @@ class Match(models.Model):
         CANCELLED = "cancelled", "Cancelled"
 
     sport = models.ForeignKey(Sport, on_delete=models.PROTECT, related_name="matches")
+    event_name = models.CharField(
+        max_length=150,
+        blank=True,
+        default="",
+        help_text="Examples: World Cup, Euro Cup, Wimbledon.",
+    )
     team_a = models.ForeignKey(
         Team, on_delete=models.PROTECT, related_name="home_matches"
     )
@@ -76,6 +93,22 @@ class Match(models.Model):
         blank=True,
         related_name="won_matches",
         help_text="Leave empty until the match is over. Must be Team A or Team B.",
+    )
+    team_a_win_points = models.IntegerField(
+        default=10,
+        help_text="Points awarded to a user who picked Team A when Team A wins.",
+    )
+    team_a_lose_points = models.IntegerField(
+        default=-5,
+        help_text="Points awarded to a user who picked Team A when Team A loses.",
+    )
+    team_b_win_points = models.IntegerField(
+        default=10,
+        help_text="Points awarded to a user who picked Team B when Team B wins.",
+    )
+    team_b_lose_points = models.IntegerField(
+        default=-5,
+        help_text="Points awarded to a user who picked Team B when Team B loses.",
     )
     is_published = models.BooleanField(
         default=False,
@@ -117,6 +150,17 @@ class Match(models.Model):
         if self.winner_id == self.team_b_id:
             return "B"
         return None
+
+    def points_for_choice(self, choice):
+        """Points to award a prediction of `choice` ('A'/'B') for the current winner.
+
+        Uses this match's own configured win/lose points, so scoring is
+        per-match rather than a single global constant.
+        """
+        winning_side = self.winning_side()
+        if choice == "A":
+            return self.team_a_win_points if winning_side == "A" else self.team_a_lose_points
+        return self.team_b_win_points if winning_side == "B" else self.team_b_lose_points
 
     def clean(self):
         errors = {}
@@ -224,3 +268,34 @@ class Prediction(models.Model):
             if self.choice == self.match.winning_side()
             else POINTS_WRONG
         )
+
+
+class ScoreAdjustment(models.Model):
+    """One net point change applied to a user's Profile by score_match().
+
+    Recorded every time scoring changes ``Prediction.points_awarded`` (first
+    scoring, a winner correction, or clearing a winner) -- the *delta*, not
+    the absolute award, so summing these never double-counts a re-score.
+    Profile.points is always the all-time total; summing this ledger's rows
+    created within the current calendar month gives the monthly leaderboard.
+    """
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="score_adjustments",
+    )
+    match = models.ForeignKey(
+        Match,
+        on_delete=models.CASCADE,
+        related_name="score_adjustments",
+    )
+    delta = models.IntegerField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        sign = "+" if self.delta >= 0 else ""
+        return f"{self.user} {sign}{self.delta} ({self.match})"

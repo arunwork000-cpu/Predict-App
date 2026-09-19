@@ -25,4 +25,48 @@
     <p class="mt-3">Already have an account? <a href="{% url 'login' %}">Log in</a></p>
   </div>
 </div>
+<script>
+  // Dependent State dropdown: narrows the full state list down to the
+  // selected country's states. Purely a UI convenience -- the server
+  // (RegistrationForm.clean()) always re-validates that the submitted
+  // state actually belongs to the submitted country.
+  var STATES_BY_COUNTRY = {{ states_by_country_json|safe }};
+  document.addEventListener("DOMContentLoaded", function () {
+    var countryField = document.getElementById("id_country");
+    var stateField = document.getElementById("id_state");
+    if (!countryField || !stateField) {
+      return;
+    }
+
+    function populateStates(preserveValue) {
+      var previousValue = preserveValue || stateField.value;
+      var states = STATES_BY_COUNTRY[countryField.value] || [];
+      stateField.innerHTML = "";
+
+      var placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = states.length
+        ? "Select a state"
+        : "Select a country first";
+      stateField.appendChild(placeholder);
+
+      states.forEach(function (state) {
+        var option = document.createElement("option");
+        option.value = state;
+        option.textContent = state;
+        if (state === previousValue) {
+          option.selected = true;
+        }
+        stateField.appendChild(option);
+      });
+    }
+
+    countryField.addEventListener("change", function () {
+      populateStates(null);
+    });
+    // On first load (including a validation-error re-render), keep whatever
+    // state was already selected/submitted if it's valid for this country.
+    populateStates(stateField.value);
+  });
+</script>
 {% endblock %}

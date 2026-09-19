@@ -1,11 +1,12 @@
 {% extends "base.html" %}
+{% load prediction_extras %}
 {% block title %}{{ match.team_a }} vs {{ match.team_b }}{% endblock %}
 {% block content %}
 <p class="mb-3"><a href="{% url 'match_list' %}">&larr; Back to matches</a></p>
 
 <div class="card card-body">
   <div class="d-flex justify-content-between align-items-start gap-3">
-    <h1 class="h3 mb-0">{{ match.team_a }} vs {{ match.team_b }}</h1>
+    <h1 class="h3 mb-0">{% team_flag match.team_a %}{{ match.team_a }} vs {% team_flag match.team_b %}{{ match.team_b }}</h1>
     {% if state == "open" %}
       <span class="badge text-bg-success">Open</span>
     {% elif state == "live" %}
@@ -22,6 +23,10 @@
   <dl class="row mb-0 mt-3">
     <dt class="col-sm-3">Sport</dt>
     <dd class="col-sm-9">{{ match.sport }}</dd>
+    {% if match.event_name %}
+      <dt class="col-sm-3">Event</dt>
+      <dd class="col-sm-9">{{ match.event_name }}</dd>
+    {% endif %}
     <dt class="col-sm-3">Kickoff</dt>
     <dd class="col-sm-9">{{ match.start_time }}</dd>
     <dt class="col-sm-3">Prediction deadline</dt>

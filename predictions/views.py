@@ -1,38 +1,86 @@
+import json
+
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
-from django.contrib.auth.forms import UserCreationForm
+from django.db.models import Sum
+from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
+from django.utils import timezone
 
-from .forms import PredictionForm
-from .models import Match, Prediction, Profile
+from .constants import DEFAULT_SPORT_SLUG, SPORT_SLUGS, SUPPORTED_SPORTS
+from .forms import PredictionForm, RegistrationForm
+from .locations import STATES_BY_COUNTRY
+from .models import Match, Prediction, Profile, ScoreAdjustment
 
 
-def match_list(request):
-    matches = list(
-        Match.objects.filter(is_published=True).select_related(
-            "team_a", "team_b", "sport", "winner"
-        )
-    )
+def _attach_user_picks(request, matches):
+    """Set `.user_pick` on each match to the requesting user's Prediction, if any."""
     user_picks = {}
     if request.user.is_authenticated:
         user_picks = {
             p.match_id: p
-            for p in Prediction.objects.filter(
-                user=request.user, match__in=matches
-            )
+            for p in Prediction.objects.filter(user=request.user, match__in=matches)
         }
     for match in matches:
         match.user_pick = user_picks.get(match.id)
+
+
+def _sport_redirect(sport):
+    """Redirect to the public sport page for `sport`, or the default page
+    when it isn't one of the four supported public sports (e.g. test data)."""
+    slug = sport.name.lower()
+    if slug in SPORT_SLUGS:
+        return redirect("sport_matches", sport_slug=slug)
+    return redirect("match_list")
+
+
+def home(request):
+    """The generic homepage: it simply shows the default sport (Football)."""
+    return sport_matches(request, DEFAULT_SPORT_SLUG)
+
+
+def sport_matches(request, sport_slug):
+    """Public page for one sport: only its published, currently-open matches."""
+    sport_name = SPORT_SLUGS.get(sport_slug)
+    if sport_name is None:
+        raise Http404("Unknown sport.")
+
+    matches = list(
+        Match.objects.filter(is_published=True, sport__name=sport_name).select_related(
+            "team_a", "team_b", "sport", "winner"
+        )
+    )
     open_matches = [m for m in matches if m.predictions_open]
-    closed_matches = [m for m in matches if not m.predictions_open]
+    _attach_user_picks(request, open_matches)
+
     return render(
         request,
-        "predictions/match_list.html",
+        "predictions/sport_matches.html",
         {
+            "sport_name": sport_name,
+            "sport_slug": sport_slug,
             "open_matches": open_matches,
-            "closed_matches": closed_matches,
         },
+    )
+
+
+def closed_matches_view(request):
+    """Public page listing every published, no-longer-open match across the
+    four supported sports (finished, live, cancelled, or deadline-passed)."""
+    matches = list(
+        Match.objects.filter(
+            is_published=True, sport__name__in=SUPPORTED_SPORTS
+        ).select_related("team_a", "team_b", "sport", "winner")
+    )
+    closed_matches = [m for m in matches if not m.predictions_open]
+    closed_matches.sort(key=lambda m: m.start_time, reverse=True)
+    _attach_user_picks(request, closed_matches)
+
+    return render(
+        request,
+        "predictions/closed_matches.html",
+        {"closed_matches": closed_matches},
     )
 
 
@@ -74,7 +122,7 @@ def match_detail(request, pk):
 
 @login_required
 def predict(request, pk):
-    match = get_object_or_404(Match, pk=pk)
+    match = get_object_or_404(Match.objects.select_related("sport"), pk=pk)
     existing = Prediction.objects.filter(user=request.user, match=match).first()
 
     if not match.predictions_open:
@@ -82,7 +130,7 @@ def predict(request, pk):
             request,
             "Predictions are locked for this match. The deadline has passed or a winner is already set.",
         )
-        return redirect("match_list")
+        return _sport_redirect(match.sport)
 
     if request.method == "POST":
         form = PredictionForm(request.POST, match=match)
@@ -94,14 +142,14 @@ def predict(request, pk):
                     request,
                     "Predictions are locked for this match. The deadline has passed or a winner is already set.",
                 )
-                return redirect("match_list")
+                return _sport_redirect(match.sport)
             Prediction.objects.update_or_create(
                 user=request.user,
                 match=match,
                 defaults={"choice": form.cleaned_data["choice"]},
             )
             messages.success(request, "Your prediction has been saved.")
-            return redirect("match_list")
+            return _sport_redirect(match.sport)
     else:
         initial = {"choice": existing.choice} if existing else None
         form = PredictionForm(match=match, initial=initial)
@@ -143,25 +191,70 @@ def my_predictions(request):
     )
 
 
-def leaderboard(request):
+def leaderboard_all_time(request):
+    """Total points across all scored predictions, all time."""
     profiles = Profile.objects.select_related("user").order_by(
         "-points", "user__username"
     )
-    return render(request, "predictions/leaderboard.html", {"profiles": profiles})
+    return render(
+        request,
+        "predictions/leaderboard.html",
+        {"profiles": profiles, "period_label": "All time", "is_monthly": False},
+    )
+
+
+def leaderboard_monthly(request):
+    """Points earned during the current calendar month.
+
+    Uses the sum of this month's ScoreAdjustment rows rather than
+    Profile.points, so a winner correction made this month for a match
+    scored last month only contributes its net adjustment -- never the full
+    original award again -- and re-running scoring with no change (delta 0)
+    contributes nothing, matching score_match()'s existing idempotency.
+    """
+    start_of_month = timezone.localtime(timezone.now()).replace(
+        day=1, hour=0, minute=0, second=0, microsecond=0
+    )
+    rows = (
+        ScoreAdjustment.objects.filter(created_at__gte=start_of_month)
+        .values("user_id")
+        .annotate(total=Sum("delta"))
+    )
+    totals = {row["user_id"]: row["total"] for row in rows}
+
+    profiles = list(Profile.objects.select_related("user"))
+    for profile in profiles:
+        profile.monthly_points = totals.get(profile.user_id, 0)
+    profiles.sort(key=lambda p: (-p.monthly_points, p.user.username))
+
+    return render(
+        request,
+        "predictions/leaderboard.html",
+        {"profiles": profiles, "period_label": "Monthly", "is_monthly": True},
+    )
 
 
 def register(request):
-    """Sign up with Django's built-in UserCreationForm, then log the user in."""
+    """Sign up with a custom form (adds required Country/State), then log in."""
     if request.user.is_authenticated:
         return redirect("match_list")
     if request.method == "POST":
-        form = UserCreationForm(request.POST)
+        form = RegistrationForm(request.POST)
         if form.is_valid():
             user = form.save()
-            # A Profile row is created automatically (see signals.py).
+            # A blank Profile row is created automatically (see signals.py);
+            # fill in the location the form collected.
+            profile = user.profile
+            profile.country = form.cleaned_data["country"]
+            profile.state = form.cleaned_data["state"]
+            profile.save(update_fields=["country", "state"])
             login(request, user)
             messages.success(request, "Welcome. You can now make predictions.")
             return redirect("match_list")
     else:
-        form = UserCreationForm()
-    return render(request, "predictions/register.html", {"form": form})
+        form = RegistrationForm()
+    return render(
+        request,
+        "predictions/register.html",
+        {"form": form, "states_by_country_json": json.dumps(STATES_BY_COUNTRY)},
+    )
