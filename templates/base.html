@@ -53,6 +53,18 @@
       vertical-align: middle;
       margin-right: 4px;
     }
+    .leaderboard-table th,
+    .leaderboard-table td {
+      white-space: nowrap;
+    }
+    .leaderboard-table th:first-child,
+    .leaderboard-table td:first-child {
+      width: 3rem;
+    }
+    .leaderboard-table th:last-child,
+    .leaderboard-table td:last-child {
+      width: 5.5rem;
+    }
     @media (max-width: 575.98px) {
       .medal-icon {
         width: 24px;
@@ -90,16 +102,8 @@
             </li>
           {% endif %}
           <li class="nav-item">
-            <a class="nav-link lh-sm py-2 {% if request.resolver_match.url_name == 'leaderboard_all_time' %}active{% endif %}"
-               href="{% url 'leaderboard_all_time' %}">
-              Leaderboard<small class="d-block text-white-50">All time</small>
-            </a>
-          </li>
-          <li class="nav-item">
-            <a class="nav-link lh-sm py-2 {% if request.resolver_match.url_name == 'leaderboard_monthly' %}active{% endif %}"
-               href="{% url 'leaderboard_monthly' %}">
-              Leaderboard<small class="d-block text-white-50">Monthly</small>
-            </a>
+            <a class="nav-link {% if request.resolver_match.url_name == 'leaderboard' %}active{% endif %}"
+               href="{% url 'leaderboard' %}">Leaderboard</a>
           </li>
         </ul>
         <ul class="navbar-nav align-items-lg-center gap-lg-2">
