@@ -191,19 +191,14 @@ def my_predictions(request):
     )
 
 
-def leaderboard_all_time(request):
+def _all_time_profiles():
     """Total points across all scored predictions, all time."""
-    profiles = Profile.objects.select_related("user").order_by(
+    return Profile.objects.select_related("user").order_by(
         "-points", "user__username"
     )
-    return render(
-        request,
-        "predictions/leaderboard.html",
-        {"profiles": profiles, "period_label": "All time", "is_monthly": False},
-    )
 
 
-def leaderboard_monthly(request):
+def _monthly_profiles():
     """Points earned during the current calendar month.
 
     Uses the sum of this month's ScoreAdjustment rows rather than
@@ -226,11 +221,18 @@ def leaderboard_monthly(request):
     for profile in profiles:
         profile.monthly_points = totals.get(profile.user_id, 0)
     profiles.sort(key=lambda p: (-p.monthly_points, p.user.username))
+    return profiles
 
+
+def leaderboard(request):
+    """One page showing the All-Time and Monthly boards side by side."""
     return render(
         request,
         "predictions/leaderboard.html",
-        {"profiles": profiles, "period_label": "Monthly", "is_monthly": True},
+        {
+            "all_time_profiles": _all_time_profiles(),
+            "monthly_profiles": _monthly_profiles(),
+        },
     )
 
 

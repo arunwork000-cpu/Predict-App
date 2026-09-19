@@ -811,8 +811,19 @@ class PageTests(TestCase):
         self.assertContains(response, "No upcoming Football matches")
 
     def test_leaderboard_empty_state(self):
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
         self.assertContains(response, "No players yet")
+
+    def test_leaderboard_shows_both_boards_with_headings(self):
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, ">All-Time</h2>")
+        self.assertContains(response, ">Monthly</h2>")
+
+    def test_old_monthly_url_redirects_to_combined_leaderboard(self):
+        response = self.client.get("/leaderboard/monthly/")
+        self.assertRedirects(
+            response, reverse("leaderboard"), status_code=301, fetch_redirect_response=False
+        )
 
 
 class MatchModelTests(TestCase):
@@ -1339,8 +1350,10 @@ class LeaderboardViewTests(TestCase):
         return user
 
     @staticmethod
-    def _row_for(content, username):
+    def _row_for(content, username, section="all-time"):
         """Return the <tr>...</tr> slice of the rendered table body for a username."""
+        marker = f'id="leaderboard-{section}"'
+        content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
         at = body.index(f"<td>{username}</td>")
         start = body.rindex("<tr", 0, at)
@@ -1359,9 +1372,9 @@ class LeaderboardViewTests(TestCase):
         self._user("alice", points=10)
         self._user("bob", points=-5)
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
 
-        profiles = list(response.context["profiles"])
+        profiles = list(response.context["all_time_profiles"])
         self.assertEqual(
             [(p.user.username, p.points) for p in profiles],
             [("carol", 30), ("alice", 10), ("bob", -5)],
@@ -1377,9 +1390,9 @@ class LeaderboardViewTests(TestCase):
         self._user("zoe", points=15)
         self._user("amy", points=15)
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
 
-        profiles = list(response.context["profiles"])
+        profiles = list(response.context["all_time_profiles"])
         self.assertEqual([p.user.username for p in profiles], ["amy", "zoe"])
         content = response.content.decode()
         self.assertLess(content.index("amy"), content.index("zoe"))
@@ -1389,7 +1402,7 @@ class LeaderboardViewTests(TestCase):
         self._user("bob", points=20)
         self.client.login(username="alice", password="pass12345")
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
         content = response.content.decode()
 
         self.assertIn("table-warning", self._row_for(content, "alice"))
@@ -1399,7 +1412,7 @@ class LeaderboardViewTests(TestCase):
         self._user("alice", points=10)
         self._user("bob", points=20)
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
 
         self.assertNotContains(response, "table-warning")
 
@@ -1414,9 +1427,9 @@ class LeaderboardViewTests(TestCase):
         match.save()
         self.assertTrue(score_match(match.pk))
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
 
-        profiles = list(response.context["profiles"])
+        profiles = list(response.context["all_time_profiles"])
         self.assertEqual(
             [(p.user.username, p.points) for p in profiles],
             [("winner", POINTS_CORRECT), ("loser", POINTS_WRONG)],
@@ -1435,7 +1448,7 @@ class LeaderboardViewTests(TestCase):
     def test_legacy_profile_with_no_location_shows_em_dash(self):
         self._user("alice", points=10)
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
         content = response.content.decode()
 
         self.assertIn("—", self._row_for(content, "alice"))
@@ -1447,7 +1460,7 @@ class LeaderboardViewTests(TestCase):
         )
         self.client.logout()
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
         content = response.content.decode()
 
         row = self._row_for(content, "arunkumar")
@@ -1467,8 +1480,11 @@ class MonthlyLeaderboardTests(TestCase):
         return user.profile.points
 
     def _monthly_totals(self):
-        response = self.client.get(reverse("leaderboard_monthly"))
-        return {p.user.username: p.monthly_points for p in response.context["profiles"]}
+        response = self.client.get(reverse("leaderboard"))
+        return {
+            p.user.username: p.monthly_points
+            for p in response.context["monthly_profiles"]
+        }
 
     def test_monthly_total_matches_this_months_scoring(self):
         alice = self._user("alice")
@@ -1565,18 +1581,22 @@ class MonthlyLeaderboardTests(TestCase):
         )
         self.client.logout()
 
-        response = self.client.get(reverse("leaderboard_monthly"))
-        content = response.content.decode()
+        response = self.client.get(reverse("leaderboard"))
+        row = LeaderboardViewTests._row_for(
+            response.content.decode(), "arunkumar", section="monthly"
+        )
 
-        self.assertIn("Kerala", content)
-        self.assertIn("India", content)
+        self.assertIn("Kerala", row)
+        self.assertIn("India", row)
 
 
 class LeaderboardMedalTests(TestCase):
     """Gold/silver/bronze medal images next to the top three rows only."""
 
     @staticmethod
-    def _row_for(content, username):
+    def _row_for(content, username, section="all-time"):
+        marker = f'id="leaderboard-{section}"'
+        content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
         at = body.index(f"<td>{username}</td>")
         start = body.rindex("<tr", 0, at)
@@ -1599,7 +1619,7 @@ class LeaderboardMedalTests(TestCase):
             user = User.objects.create_user(f"player{index}", password="pass12345")
             Profile.objects.filter(user=user).update(points=100 - index * 10)
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
         content = response.content.decode()
 
         self._assert_medal(
@@ -1628,25 +1648,22 @@ class LeaderboardMedalTests(TestCase):
         for user, delta in zip(users, (40, 30, 20, 10)):
             ScoreAdjustment.objects.create(user=user, match=match, delta=delta)
 
-        response = self.client.get(reverse("leaderboard_monthly"))
+        response = self.client.get(reverse("leaderboard"))
         content = response.content.decode()
 
-        self._assert_medal(
-            self._row_for(content, "m0"), "gold.svg", "Gold medal — first place"
-        )
-        self._assert_medal(
-            self._row_for(content, "m1"), "silver.svg", "Silver medal — second place"
-        )
-        self._assert_medal(
-            self._row_for(content, "m2"), "bronze.svg", "Bronze medal — third place"
-        )
-        self._assert_no_medal(self._row_for(content, "m3"))
+        def row(name):
+            return self._row_for(content, name, section="monthly")
+
+        self._assert_medal(row("m0"), "gold.svg", "Gold medal — first place")
+        self._assert_medal(row("m1"), "silver.svg", "Silver medal — second place")
+        self._assert_medal(row("m2"), "bronze.svg", "Bronze medal — third place")
+        self._assert_no_medal(row("m3"))
 
     def test_fewer_than_three_players_shows_no_missing_medal_errors(self):
         user = User.objects.create_user("solo", password="pass12345")
         Profile.objects.filter(user=user).update(points=5)
 
-        response = self.client.get(reverse("leaderboard_all_time"))
+        response = self.client.get(reverse("leaderboard"))
 
         self.assertEqual(response.status_code, 200)
         self._assert_medal(

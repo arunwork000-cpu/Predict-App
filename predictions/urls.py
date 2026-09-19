@@ -1,4 +1,5 @@
 from django.urls import path
+from django.views.generic import RedirectView
 
 from . import views
 
@@ -10,8 +11,13 @@ urlpatterns = [
     path("matches/<int:pk>/", views.match_detail, name="match_detail"),
     path("matches/<int:pk>/predict/", views.predict, name="predict"),
     path("predictions/mine/", views.my_predictions, name="my_predictions"),
-    path("leaderboard/", views.leaderboard_all_time, name="leaderboard_all_time"),
-    path("leaderboard/monthly/", views.leaderboard_monthly, name="leaderboard_monthly"),
+    path("leaderboard/", views.leaderboard, name="leaderboard"),
+    # Old separate pages now live on the combined page; keep the URLs alive.
+    path(
+        "leaderboard/monthly/",
+        RedirectView.as_view(pattern_name="leaderboard", permanent=True),
+        name="leaderboard_monthly",
+    ),
     # Django has no built-in register view; login/logout are in config/urls.py.
     path("accounts/register/", views.register, name="register"),
 ]
