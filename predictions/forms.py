@@ -6,8 +6,12 @@ from .locations import COUNTRY_CHOICES, STATE_CHOICES, states_for
 from .models import Match, Prediction
 
 
+MIN_AGE = 18
+MAX_AGE = 99
+
+
 class RegistrationForm(UserCreationForm):
-    """UserCreationForm plus required Country/State dropdowns.
+    """UserCreationForm plus optional Email and required Country/State/Age.
 
     Both fields are ChoiceFields (rendered as <select>), so a submission can
     only carry one of the values we listed -- never free text. The state
@@ -16,6 +20,14 @@ class RegistrationForm(UserCreationForm):
     country/state match is enforced in clean() below.
     """
 
+    email = forms.EmailField(
+        required=False,
+        label="Email",
+        help_text=(
+            "Optional, but you must provide an email address to be eligible "
+            "to win prizes."
+        ),
+    )
     country = forms.ChoiceField(
         choices=[("", "Select a country")] + COUNTRY_CHOICES,
         label="Country",
@@ -24,9 +36,27 @@ class RegistrationForm(UserCreationForm):
         choices=[("", "Select a country first")] + STATE_CHOICES,
         label="State / Province / Region",
     )
+    age = forms.TypedChoiceField(
+        choices=[("", "Select your age")]
+        + [(a, str(a)) for a in range(MIN_AGE, MAX_AGE + 1)],
+        coerce=int,
+        empty_value=None,
+        label="Age",
+    )
+
+    field_order = [
+        "username",
+        "email",
+        "password1",
+        "password2",
+        "country",
+        "state",
+        "age",
+    ]
 
     class Meta(UserCreationForm.Meta):
         model = User
+        fields = ("username", "email")
 
     def clean(self):
         cleaned_data = super().clean()

@@ -480,6 +480,7 @@ def registration_data(**overrides):
         "password2": "StrongPass123",
         "country": "India",
         "state": "Kerala",
+        "age": "30",
     }
     data.update(overrides)
     return data
@@ -2686,3 +2687,70 @@ class DatabaseFlagStorageTests(TestCase):
         name = team.flag.name
         team.flag.delete(save=True)
         self.assertFalse(StoredFile.objects.filter(name=name).exists())
+
+
+class RegistrationEmailAgeTests(TestCase):
+    """Optional Email, required Age (18-99) and required-field stars."""
+
+    def _register(self, **overrides):
+        return self.client.post(reverse("register"), registration_data(**overrides))
+
+    def test_email_is_optional(self):
+        response = self._register()
+        self.assertRedirects(response, reverse("match_list"))
+        self.assertEqual(User.objects.get(username="newuser").email, "")
+
+    def test_email_is_saved_when_given(self):
+        self._register(email="fan@example.com")
+        self.assertEqual(User.objects.get(username="newuser").email, "fan@example.com")
+
+    def test_invalid_email_is_rejected(self):
+        response = self._register(email="not-an-email")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+
+    def test_age_is_saved_on_profile(self):
+        self._register(age="45")
+        self.assertEqual(User.objects.get(username="newuser").profile.age, 45)
+
+    def test_age_is_required(self):
+        response = self._register(age="")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+
+    def test_age_out_of_range_is_rejected(self):
+        for bad in ("17", "100", "abc", "0"):
+            with self.subTest(age=bad):
+                response = self._register(age=bad)
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(User.objects.filter(username="newuser").exists())
+
+    def test_age_boundaries_are_accepted(self):
+        for i, age in enumerate(("18", "99")):
+            with self.subTest(age=age):
+                self.client.logout()
+                self._register(username=f"edge{i}", age=age)
+                self.assertEqual(User.objects.get(username=f"edge{i}").profile.age, int(age))
+
+    def test_page_shows_age_dropdown_18_to_99_and_prize_note(self):
+        response = self.client.get(reverse("register"))
+        content = response.content.decode()
+        self.assertIn('<option value="18">18</option>', content)
+        self.assertIn('<option value="99">99</option>', content)
+        self.assertNotIn('<option value="17">', content)
+        self.assertNotIn('<option value="100">', content)
+        self.assertContains(
+            response,
+            "Optional, but you must provide an email address to be eligible to win prizes.",
+        )
+
+    def test_required_fields_are_starred_and_email_is_not(self):
+        content = self.client.get(reverse("register")).content.decode()
+        for field in ("username", "password1", "password2", "country", "state", "age"):
+            with self.subTest(field=field):
+                label = re.search(
+                    rf'<label[^>]*for="id_{field}"[^>]*>(.*?)</label>', content, re.S
+                )
+                self.assertIn("*", label.group(1))
+        email_label = re.search(r'<label[^>]*for="id_email"[^>]*>(.*?)</label>', content, re.S)
+        self.assertNotIn("*", email_label.group(1))

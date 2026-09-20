@@ -35,11 +35,11 @@ class TeamAdmin(admin.ModelAdmin):
 class ProfileAdmin(admin.ModelAdmin):
     # country/state stay editable (not in readonly_fields) so an admin can
     # correct a legacy account that has none, or fix a typo.
-    list_display = ("user", "points", "state", "country")
+    list_display = ("user", "points", "age", "state", "country")
     list_filter = ("country",)
     search_fields = ("user__username", "state", "country")
     readonly_fields = ("user", "points")
-    fields = ("user", "points", "country", "state")
+    fields = ("user", "points", "age", "country", "state")
 
 
 @admin.register(Match)

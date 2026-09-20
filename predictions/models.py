@@ -1,5 +1,6 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
 
@@ -18,6 +19,12 @@ class Profile(models.Model):
     # Required at signup; enforced by RegistrationForm, not here.
     country = models.CharField(max_length=100, blank=True, default="")
     state = models.CharField(max_length=100, blank=True, default="")
+    # Collected at signup (18-99); blank for accounts created before it existed.
+    age = models.PositiveSmallIntegerField(
+        null=True,
+        blank=True,
+        validators=[MinValueValidator(18), MaxValueValidator(99)],
+    )
 
     class Meta:
         ordering = ["-points", "user__username"]

@@ -4,13 +4,14 @@
 <div class="row justify-content-center">
   <div class="col-md-6">
     <h1 class="h3 mb-3">Create an account</h1>
-    <p class="text-muted">Join the points game. No real-money betting.</p>
+    <p class="text-muted mb-1">Join the points game. No real-money betting.</p>
+    <p class="small text-muted"><span class="text-danger">*</span> marks a required field.</p>
     <form method="post" class="card card-body">
       {# csrf_token is required on every POST form. #}
       {% csrf_token %}
       {% for field in form %}
         <div class="mb-3">
-          <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+          <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required %} <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden">(required)</span>{% endif %}</label>
           {{ field }}
           {% if field.help_text %}
             <div class="form-text">{{ field.help_text }}</div>

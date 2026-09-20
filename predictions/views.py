@@ -244,7 +244,7 @@ def leaderboard(request):
 
 
 def register(request):
-    """Sign up with a custom form (adds required Country/State), then log in."""
+    """Sign up with a custom form (optional Email; required Country/State/Age), then log in."""
     if request.user.is_authenticated:
         return redirect("match_list")
     if request.method == "POST":
@@ -252,11 +252,12 @@ def register(request):
         if form.is_valid():
             user = form.save()
             # A blank Profile row is created automatically (see signals.py);
-            # fill in the location the form collected.
+            # fill in the location and age the form collected.
             profile = user.profile
             profile.country = form.cleaned_data["country"]
             profile.state = form.cleaned_data["state"]
-            profile.save(update_fields=["country", "state"])
+            profile.age = form.cleaned_data["age"]
+            profile.save(update_fields=["country", "state", "age"])
             login(request, user)
             messages.success(request, "Welcome. You can now make predictions.")
             return redirect("match_list")
