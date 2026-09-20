@@ -28,9 +28,9 @@
       <dd class="col-sm-9">{{ match.event_name }}</dd>
     {% endif %}
     <dt class="col-sm-3">Kickoff</dt>
-    <dd class="col-sm-9">{{ match.start_time }}</dd>
+    <dd class="col-sm-9">{{ match.start_time|date:"N j, Y, P T" }}</dd>
     <dt class="col-sm-3">Prediction deadline</dt>
-    <dd class="col-sm-9">{{ match.prediction_deadline }}</dd>
+    <dd class="col-sm-9">{{ match.prediction_deadline|date:"N j, Y, P T" }}</dd>
   </dl>
 </div>
 

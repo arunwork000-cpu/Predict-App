@@ -2,7 +2,7 @@
 {% block title %}Predict{% endblock %}
 {% block content %}
 <h1 class="h3">{{ match.team_a }} vs {{ match.team_b }}</h1>
-<p class="text-muted">Kickoff: {{ match.start_time }} · Deadline: {{ match.prediction_deadline }}</p>
+<p class="text-muted">Kickoff: {{ match.start_time|date:"N j, Y, P T" }} · Deadline: {{ match.prediction_deadline|date:"N j, Y, P T" }}</p>
 {% if existing %}
   <p>Current pick: <strong>{{ existing.choice_name }}</strong>. You can change it until the deadline.</p>
 {% endif %}

@@ -16,7 +16,7 @@
         {% if match.event_name %}
           <div class="small text-muted">{{ match.event_name }}</div>
         {% endif %}
-        <div class="small text-muted">Kickoff: {{ match.start_time }} · Deadline: {{ match.prediction_deadline }}</div>
+        <div class="small text-muted">Kickoff: {{ match.start_time|date:"N j, Y, P T" }} · Deadline: {{ match.prediction_deadline|date:"N j, Y, P T" }}</div>
         <div class="small mt-1">
           {% if match.status == "cancelled" %}
             <span class="badge text-bg-danger">Cancelled</span>

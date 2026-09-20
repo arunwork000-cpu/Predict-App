@@ -26,7 +26,7 @@
               {% endif %}
             </td>
             <td>{{ p.choice_name }}</td>
-            <td class="small text-muted">{{ p.match.start_time }}</td>
+            <td class="small text-muted">{{ p.match.start_time|date:"N j, Y, P T" }}</td>
           </tr>
         {% endfor %}
       </tbody>

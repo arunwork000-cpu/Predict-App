@@ -87,6 +87,8 @@ MIDDLEWARE = [
     # directly after SecurityMiddleware and before everything else.
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
+    # Activates the visitor's browser-reported time zone (tz cookie).
+    'predictions.middleware.TimezoneMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',

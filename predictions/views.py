@@ -207,7 +207,8 @@ def _monthly_profiles():
     original award again -- and re-running scoring with no change (delta 0)
     contributes nothing, matching score_match()'s existing idempotency.
     """
-    start_of_month = timezone.localtime(timezone.now()).replace(
+    # Fixed site zone (not the visitor's) so every user sees the same board.
+    start_of_month = timezone.now().astimezone(timezone.get_default_timezone()).replace(
         day=1, hour=0, minute=0, second=0, microsecond=0
     )
     rows = (

@@ -2272,3 +2272,53 @@ class SettingsSecurityTests(SimpleTestCase):
             settings["CSRF_TRUSTED_ORIGINS"],
             ["https://a.example", "https://b.example"],
         )
+
+
+class VisitorTimezoneTests(TestCase):
+    """Times render in the zone from the visitor's ``tz`` cookie, falling
+    back to UTC when it is missing or invalid."""
+
+    def setUp(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        when = datetime(2026, 3, 10, 10, 0, tzinfo=dt_timezone.utc)
+        self.match = future_match(start_time=when, prediction_deadline=when)
+        self.url = reverse("match_detail", args=[self.match.pk])
+
+    def _get(self, tz=None):
+        if tz is not None:
+            self.client.cookies["tz"] = tz
+        return self.client.get(self.url)
+
+    def test_no_cookie_renders_utc(self):
+        response = self._get()
+        self.assertContains(response, "10 a.m. UTC")
+
+    def test_cookie_renders_visitor_zone(self):
+        response = self._get("Asia/Kolkata")
+        self.assertContains(response, "3:30 p.m. IST")
+        self.assertNotContains(response, "10 a.m. UTC")
+
+    def test_invalid_cookie_falls_back_to_utc(self):
+        for bad in ("Bogus/Zone", "../etc/passwd", ""):
+            with self.subTest(cookie=bad):
+                response = self._get(bad)
+                self.assertEqual(response.status_code, 200)
+                self.assertContains(response, "10 a.m. UTC")
+
+    def test_zone_does_not_leak_between_requests(self):
+        self._get("Asia/Kolkata")
+        self.client.cookies.pop("tz")
+        self.assertContains(self._get(), "10 a.m. UTC")
+
+    def test_monthly_leaderboard_ignores_visitor_zone(self):
+        def totals(tz):
+            self.client.cookies["tz"] = tz
+            response = self.client.get(reverse("leaderboard"))
+            return [
+                (p.user.username, p.monthly_points)
+                for p in response.context["monthly_profiles"]
+            ]
+
+        User.objects.create_user("alice", password="pass12345")
+        self.assertEqual(totals("Pacific/Kiritimati"), totals("Pacific/Pago_Pago"))

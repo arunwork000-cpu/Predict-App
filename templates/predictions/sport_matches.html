@@ -11,7 +11,7 @@
       <div class="list-group-item">
         <div>
           <strong><a href="{% url 'match_detail' match.pk %}">{% team_flag match.team_a %}{{ match.team_a }} vs {% team_flag match.team_b %}{{ match.team_b }}</a></strong>
-          <div class="small text-muted">Kickoff: {{ match.start_time }} · Deadline: {{ match.prediction_deadline }}</div>
+          <div class="small text-muted">Kickoff: {{ match.start_time|date:"N j, Y, P T" }} · Deadline: {{ match.prediction_deadline|date:"N j, Y, P T" }}</div>
           <div class="small fw-semibold mt-1">Predict the Win</div>
           {% if match.event_name %}
             <div class="small text-muted">{{ match.event_name }}</div>
