@@ -2298,7 +2298,7 @@ class SettingsSecurityTests(SimpleTestCase):
 
 class VisitorTimezoneTests(TestCase):
     """Times render in the zone from the visitor's ``tz`` cookie, falling
-    back to UTC when it is missing or invalid."""
+    back to India Standard Time when it is missing or invalid."""
 
     def setUp(self):
         from datetime import datetime, timezone as dt_timezone
@@ -2312,26 +2312,26 @@ class VisitorTimezoneTests(TestCase):
             self.client.cookies["tz"] = tz
         return self.client.get(self.url)
 
-    def test_no_cookie_renders_utc(self):
+    def test_no_cookie_renders_india_time(self):
         response = self._get()
-        self.assertContains(response, "10 a.m. UTC")
+        self.assertContains(response, "3:30 p.m. IST")
 
     def test_cookie_renders_visitor_zone(self):
-        response = self._get("Asia/Kolkata")
-        self.assertContains(response, "3:30 p.m. IST")
-        self.assertNotContains(response, "10 a.m. UTC")
+        response = self._get("America/New_York")
+        self.assertContains(response, "6 a.m. EDT")
+        self.assertNotContains(response, "3:30 p.m. IST")
 
-    def test_invalid_cookie_falls_back_to_utc(self):
+    def test_invalid_cookie_falls_back_to_india_time(self):
         for bad in ("Bogus/Zone", "../etc/passwd", ""):
             with self.subTest(cookie=bad):
                 response = self._get(bad)
                 self.assertEqual(response.status_code, 200)
-                self.assertContains(response, "10 a.m. UTC")
+                self.assertContains(response, "3:30 p.m. IST")
 
     def test_zone_does_not_leak_between_requests(self):
-        self._get("Asia/Kolkata")
+        self._get("America/New_York")
         self.client.cookies.pop("tz")
-        self.assertContains(self._get(), "10 a.m. UTC")
+        self.assertContains(self._get(), "3:30 p.m. IST")
 
     def test_monthly_leaderboard_ignores_visitor_zone(self):
         def totals(tz):
@@ -2848,3 +2848,86 @@ class MatchAdminTeamsBySportTests(TestCase):
         self.assertEqual(
             sorted(t[1] for t in mapping[str(self.cricket.pk)]), ["C One", "C Two"]
         )
+
+
+class IndiaTimeZoneTests(TestCase):
+    """Site default is IST: admin entry, leaderboard month, and fallback."""
+
+    def test_site_time_zone_is_india(self):
+        from django.conf import settings
+
+        self.assertEqual(settings.TIME_ZONE, "Asia/Kolkata")
+
+    def test_admin_ignores_visitor_zone_cookie_and_uses_ist(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(admin_user)
+        self.client.cookies["tz"] = "America/New_York"
+        when = datetime(2026, 3, 10, 10, 0, tzinfo=dt_timezone.utc)
+        match = future_match(start_time=when, prediction_deadline=when)
+        response = self.client.get(
+            reverse("admin:predictions_match_change", args=[match.pk])
+        )
+        # 10:00 UTC is 15:30 in India; the admin form shows IST, not New York.
+        self.assertContains(response, 'value="15:30:00"')
+        self.assertNotContains(response, 'value="06:00:00"')
+
+    def test_entering_time_in_admin_is_read_as_ist(self):
+        admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(admin_user)
+        sport = Sport.objects.get(name="Football")
+        a = Team.objects.create(name="IA", sport=sport)
+        b = Team.objects.create(name="IB", sport=sport)
+        response = self.client.post(
+            reverse("admin:predictions_match_add"),
+            {
+                "sport": sport.pk,
+                "event_name": "",
+                "team_a": a.pk,
+                "team_b": b.pk,
+                "start_time_0": "2030-01-10",
+                "start_time_1": "18:00:00",
+                "prediction_deadline_0": "2030-01-10",
+                "prediction_deadline_1": "17:00:00",
+                "status": Match.Status.SCHEDULED,
+                "team_a_win_points": 10,
+                "team_a_lose_points": -5,
+                "team_b_win_points": 10,
+                "team_b_lose_points": -5,
+                "draw_win_points": 10,
+                "draw_lose_points": -5,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        match = Match.objects.get(team_a=a)
+        # 18:00 IST is 12:30 UTC.
+        self.assertEqual((match.start_time.hour, match.start_time.minute), (12, 30))
+
+    def test_monthly_leaderboard_month_starts_at_midnight_ist(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        user = User.objects.create_user("indian", password="pass12345")
+        match = future_match()
+        # IST midnight on 1 Sept 2026 is 18:30 UTC on 31 Aug.
+        before = ScoreAdjustment.objects.create(user=user, match=match, delta=7)
+        inside = ScoreAdjustment.objects.create(user=user, match=match, delta=5)
+        ScoreAdjustment.objects.filter(pk=before.pk).update(
+            created_at=datetime(2026, 8, 31, 18, 0, tzinfo=dt_timezone.utc)
+        )
+        ScoreAdjustment.objects.filter(pk=inside.pk).update(
+            created_at=datetime(2026, 8, 31, 19, 0, tzinfo=dt_timezone.utc)
+        )
+        fake_now = datetime(2026, 9, 15, 12, 0, tzinfo=dt_timezone.utc)
+        for cookie in ("America/Los_Angeles", "Pacific/Auckland", "Asia/Kolkata"):
+            with self.subTest(visitor_zone=cookie):
+                self.client.cookies["tz"] = cookie
+                with mock.patch(
+                    "predictions.views.timezone.now", return_value=fake_now
+                ):
+                    response = self.client.get(reverse("leaderboard"))
+                totals = {
+                    p.user.username: p.monthly_points
+                    for p in response.context["monthly_profiles"]
+                }
+                self.assertEqual(totals["indian"], 5)
