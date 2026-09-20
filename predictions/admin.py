@@ -53,10 +53,11 @@ class MatchAdmin(admin.ModelAdmin):
         "prediction_deadline",
         "status",
         "winner",
+        "is_draw",
         "is_published",
         "is_scored",
     )
-    list_filter = ("sport", "status", "is_published", "is_scored")
+    list_filter = ("sport", "status", "is_draw", "is_published", "is_scored")
     search_fields = ("team_a__name", "team_b__name", "event_name")
     autocomplete_fields = ("sport", "team_a", "team_b", "winner")
     date_hierarchy = "start_time"
@@ -76,6 +77,7 @@ class MatchAdmin(admin.ModelAdmin):
                 "prediction_deadline",
                 "status",
                 "winner",
+                "is_draw",
                 "is_published",
                 "is_scored",
             ),
@@ -86,8 +88,13 @@ class MatchAdmin(admin.ModelAdmin):
                 "team_a_lose_points",
                 "team_b_win_points",
                 "team_b_lose_points",
+                "draw_win_points",
+                "draw_lose_points",
             ),
-            "description": "Points awarded for a correct/incorrect pick on each team. Defaults: win 10, lose -5.",
+            "description": (
+                "Points awarded for a correct/incorrect pick. Defaults: win 10, lose -5. "
+                "The Draw points apply only to Football, Cricket and Hockey."
+            ),
         }),
     )
 

@@ -48,7 +48,10 @@ class PredictionForm(forms.Form):
 
     def __init__(self, *args, match: Match, **kwargs):
         super().__init__(*args, **kwargs)
-        self.fields["choice"].choices = [
+        choices = [
             (Prediction.Side.A, str(match.team_a)),
             (Prediction.Side.B, str(match.team_b)),
         ]
+        if match.allows_draw:
+            choices.append((Prediction.Side.DRAW, "Draw"))
+        self.fields["choice"].choices = choices

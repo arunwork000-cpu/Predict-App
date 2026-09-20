@@ -24,8 +24,8 @@
           {% elif match.status == "live" %}
             <span class="badge text-bg-warning">Live</span>
             This match is in progress. Predictions are closed.
-          {% elif match.winner %}
-            Winner: <strong>{{ match.winner_name }}</strong>
+          {% elif match.has_result %}
+            {% if match.is_draw %}Result{% else %}Winner{% endif %}: <strong>{{ match.winner_name }}</strong>
             {% if match.is_scored %}<span class="badge text-bg-secondary">Scored</span>{% endif %}
           {% else %}
             Predictions locked. Winner not entered yet.

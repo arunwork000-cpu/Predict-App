@@ -8,7 +8,7 @@ from django.http import Http404
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
-from .constants import DEFAULT_SPORT_SLUG, SPORT_SLUGS, SUPPORTED_SPORTS
+from .constants import DEFAULT_SPORT_SLUG, DRAW_SPORTS, SPORT_SLUGS, SUPPORTED_SPORTS
 from .forms import PredictionForm, RegistrationForm
 from .locations import STATES_BY_COUNTRY
 from .models import Match, Prediction, Profile, ScoreAdjustment
@@ -61,6 +61,7 @@ def sport_matches(request, sport_slug):
             "sport_name": sport_name,
             "sport_slug": sport_slug,
             "open_matches": open_matches,
+            "draw_sports": DRAW_SPORTS,
         },
     )
 
@@ -94,7 +95,7 @@ def match_detail(request, pk):
 
     if match.status == Match.Status.CANCELLED:
         state = "cancelled"
-    elif match.winner_id:
+    elif match.has_result:
         state = "completed"
     elif match.status == Match.Status.LIVE:
         state = "live"

@@ -1766,8 +1766,8 @@ class SportMatchesViewTests(TestCase):
         response = self.client.get(reverse("sport_matches", args=["football"]))
 
         self.assertContains(response, "Predicted")
-        self.assertContains(response, "Win:")
-        self.assertContains(response, "Lose:")
+        self.assertContains(response, "If win get:")
+        self.assertContains(response, "If lose get:")
 
     def test_open_match_shows_predict_the_win_label(self):
         sport_match("Cricket", "CA cta", "CB cta")
@@ -1786,10 +1786,10 @@ class SportMatchesViewTests(TestCase):
 
         response = self.client.get(reverse("sport_matches", args=["tennis"]))
 
-        self.assertContains(response, "Win: 20")
-        self.assertContains(response, "Lose: -8")
-        self.assertContains(response, "Win: 15")
-        self.assertContains(response, "Lose: -3")
+        self.assertContains(response, "If win get: 20")
+        self.assertContains(response, "If lose get: -8")
+        self.assertContains(response, "If win get: 15")
+        self.assertContains(response, "If lose get: -3")
 
     def test_authenticated_user_can_predict_directly_from_a_sport_page(self):
         match = sport_match("Badminton", "BA inline", "BB inline")
@@ -1819,8 +1819,8 @@ class SportMatchesViewTests(TestCase):
         response = self.client.get(reverse("sport_matches", args=["football"]))
 
         self.assertNotContains(response, "<form")
-        self.assertContains(response, "Win:")
-        self.assertContains(response, "Lose:")
+        self.assertContains(response, "If win get:")
+        self.assertContains(response, "If lose get:")
 
     def test_guest_sees_login_to_predict_and_not_the_predict_link(self):
         match = sport_match("Football", "FA guest", "FB guest")
@@ -2114,6 +2114,8 @@ class HockeySportTests(TestCase):
                 "team_a_lose_points": -5,
                 "team_b_win_points": 10,
                 "team_b_lose_points": -5,
+                "draw_win_points": 10,
+                "draw_lose_points": -5,
             },
         )
 
@@ -2322,3 +2324,142 @@ class VisitorTimezoneTests(TestCase):
 
         User.objects.create_user("alice", password="pass12345")
         self.assertEqual(totals("Pacific/Kiritimati"), totals("Pacific/Pago_Pago"))
+
+
+class DrawTests(TestCase):
+    """Draw as a third pick for Football/Cricket/Hockey, with admin-set points."""
+
+    def setUp(self):
+        self.alice = User.objects.create_user("alice", password="pass12345")
+        self.bob = User.objects.create_user("bob", password="pass12345")
+        self.carol = User.objects.create_user("carol", password="pass12345")
+
+    def _predict(self, user, match, choice):
+        self.client.force_login(user)
+        return self.client.post(
+            reverse("predict", args=[match.pk]), {"choice": choice}
+        )
+
+    def test_draw_offered_only_for_draw_sports(self):
+        self.client.force_login(self.alice)
+        for sport_name, expected in [
+            ("Football", True),
+            ("Cricket", True),
+            ("Hockey", True),
+            ("Tennis", False),
+            ("Badminton", False),
+        ]:
+            with self.subTest(sport=sport_name):
+                sport_match(sport_name)
+                response = self.client.get(
+                    reverse("sport_matches", args=[sport_name.lower()])
+                )
+                self.assertEqual(b'value="D"' in response.content, expected)
+
+    def test_can_save_draw_pick_for_football(self):
+        match = sport_match("Football")
+        self._predict(self.alice, match, "D")
+        self.assertEqual(Prediction.objects.get(user=self.alice).choice, "D")
+
+    def test_draw_pick_rejected_for_tennis(self):
+        match = sport_match("Tennis")
+        self._predict(self.alice, match, "D")
+        self.assertFalse(Prediction.objects.filter(user=self.alice).exists())
+
+    def test_draw_result_scores_using_admin_draw_points(self):
+        match = sport_match(
+            "Football", draw_win_points=25, draw_lose_points=-2
+        )
+        Prediction.objects.create(user=self.alice, match=match, choice="D")
+        Prediction.objects.create(user=self.bob, match=match, choice="A")
+        Prediction.objects.create(user=self.carol, match=match, choice="B")
+
+        match.is_draw = True
+        match.save()
+        self.assertTrue(score_match(match.pk))
+
+        points = {
+            p.user.username: p.points_awarded for p in match.predictions.all()
+        }
+        # Draw pickers win the draw points; team pickers lose their lose points.
+        self.assertEqual(points["alice"], 25)
+        self.assertEqual(points["bob"], match.team_a_lose_points)
+        self.assertEqual(points["carol"], match.team_b_lose_points)
+        self.alice.profile.refresh_from_db()
+        self.assertEqual(self.alice.profile.points, 25)
+        self.assertFalse(score_match(match.pk))  # idempotent
+
+    def test_draw_pick_loses_when_a_team_wins(self):
+        match = sport_match("Cricket", draw_lose_points=-7)
+        Prediction.objects.create(user=self.alice, match=match, choice="D")
+        match.winner = match.team_a
+        match.save()
+        score_match(match.pk)
+        self.assertEqual(match.predictions.get().points_awarded, -7)
+
+    def test_correcting_draw_to_winner_reconciles_points(self):
+        match = sport_match("Hockey", draw_win_points=25, draw_lose_points=-2)
+        Prediction.objects.create(user=self.alice, match=match, choice="D")
+        match.is_draw = True
+        match.save()
+        score_match(match.pk)
+
+        match.is_draw = False
+        match.winner = match.team_b
+        match.save()
+        score_match(match.pk)
+
+        self.alice.profile.refresh_from_db()
+        self.assertEqual(self.alice.profile.points, -2)
+
+        match.winner = None
+        match.save()
+        score_match(match.pk)
+        self.alice.profile.refresh_from_db()
+        self.assertEqual(self.alice.profile.points, 0)
+
+    def test_draw_closes_predictions_and_shows_in_closed_matches(self):
+        match = sport_match("Football")
+        self.assertTrue(match.predictions_open)
+        match.is_draw = True
+        match.save()
+        self.assertFalse(match.predictions_open)
+        response = self.client.get(reverse("closed_matches"))
+        self.assertContains(response, "Result: <strong>Draw</strong>")
+
+    def test_match_clean_validation(self):
+        from django.core.exceptions import ValidationError
+
+        tennis = sport_match("Tennis", is_draw=True)
+        with self.assertRaises(ValidationError) as ctx:
+            tennis.full_clean()
+        self.assertIn("is_draw", ctx.exception.message_dict)
+
+        football = sport_match("Football", is_draw=True)
+        football.winner = football.team_a
+        with self.assertRaises(ValidationError) as ctx:
+            football.full_clean()
+        self.assertIn("is_draw", ctx.exception.message_dict)
+
+        ok = sport_match("Hockey", is_draw=True)
+        ok.full_clean()
+
+    def test_draw_pick_display_names(self):
+        match = sport_match("Football", is_draw=True)
+        pick = Prediction.objects.create(user=self.alice, match=match, choice="D")
+        self.assertEqual(pick.choice_name(), "Draw")
+        self.assertEqual(match.winner_name(), "Draw")
+
+    def test_admin_form_exposes_draw_fields(self):
+        admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(admin_user)
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        self.assertEqual(response.status_code, 200)
+        for field in ("draw_win_points", "draw_lose_points", "is_draw"):
+            self.assertContains(response, f'name="{field}"')
+
+    def test_draw_box_uses_plain_language_labels(self):
+        sport_match("Football", draw_win_points=15, draw_lose_points=-3)
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+        self.assertContains(response, "If Draw get: 15")
+        self.assertContains(response, "If Win/Lose get: -3")

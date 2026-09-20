@@ -24,6 +24,7 @@ def public_nav(request):
             is_published=True,
             status=Match.Status.SCHEDULED,
             winner__isnull=True,
+            is_draw=False,
             prediction_deadline__gt=timezone.now(),
             sport__name__in=SUPPORTED_SPORTS,
         ).values_list("sport__name", flat=True)

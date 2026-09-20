@@ -3,6 +3,8 @@ from django.core.exceptions import ValidationError
 from django.db import models
 from django.utils import timezone
 
+from .constants import DRAW_SPORTS
+
 
 class Profile(models.Model):
     user = models.OneToOneField(
@@ -94,6 +96,13 @@ class Match(models.Model):
         related_name="won_matches",
         help_text="Leave empty until the match is over. Must be Team A or Team B.",
     )
+    is_draw = models.BooleanField(
+        default=False,
+        help_text=(
+            "Tick if the match ended in a draw (Football, Cricket and Hockey "
+            "only). Leave Winner empty when this is ticked."
+        ),
+    )
     team_a_win_points = models.IntegerField(
         default=10,
         help_text="Points awarded to a user who picked Team A when Team A wins.",
@@ -109,6 +118,14 @@ class Match(models.Model):
     team_b_lose_points = models.IntegerField(
         default=-5,
         help_text="Points awarded to a user who picked Team B when Team B loses.",
+    )
+    draw_win_points = models.IntegerField(
+        default=10,
+        help_text="Points awarded to a user who picked Draw when the match is a draw.",
+    )
+    draw_lose_points = models.IntegerField(
+        default=-5,
+        help_text="Points awarded to a user who picked Draw when the match is not a draw.",
     )
     is_published = models.BooleanField(
         default=False,
@@ -134,15 +151,29 @@ class Match(models.Model):
         return (
             self.is_published
             and timezone.now() < self.prediction_deadline
-            and self.winner_id is None
+            and not self.has_result
             and self.status == self.Status.SCHEDULED
         )
 
+    @property
+    def allows_draw(self):
+        """True for sports where a match can end level (offers a Draw pick)."""
+        return self.sport.name in DRAW_SPORTS
+
+    @property
+    def has_result(self):
+        """True once a winner or a draw has been entered."""
+        return self.winner_id is not None or self.is_draw
+
     def winner_name(self):
+        if self.is_draw:
+            return "Draw"
         return str(self.winner) if self.winner_id else None
 
     def winning_side(self):
-        """'A' or 'B' if a winner is set, else None. Used by scoring."""
+        """'A', 'B' or 'D' (draw) if a result is set, else None. Used by scoring."""
+        if self.is_draw:
+            return "D"
         if not self.winner_id:
             return None
         if self.winner_id == self.team_a_id:
@@ -152,12 +183,14 @@ class Match(models.Model):
         return None
 
     def points_for_choice(self, choice):
-        """Points to award a prediction of `choice` ('A'/'B') for the current winner.
+        """Points to award a prediction of `choice` ('A'/'B'/'D') for the current result.
 
         Uses this match's own configured win/lose points, so scoring is
         per-match rather than a single global constant.
         """
         winning_side = self.winning_side()
+        if choice == "D":
+            return self.draw_win_points if winning_side == "D" else self.draw_lose_points
         if choice == "A":
             return self.team_a_win_points if winning_side == "A" else self.team_a_lose_points
         return self.team_b_win_points if winning_side == "B" else self.team_b_lose_points
@@ -178,6 +211,14 @@ class Match(models.Model):
             if self.winner_id not in (self.team_a_id, self.team_b_id):
                 errors["winner"] = "Winner must be Team A or Team B."
 
+        if self.is_draw:
+            if self.winner_id:
+                errors["is_draw"] = "A draw cannot also have a winner. Clear the winner."
+            elif self.sport_id and not self.allows_draw:
+                errors["is_draw"] = (
+                    f"{self.sport.name} matches cannot end in a draw."
+                )
+
         if (
             self.prediction_deadline
             and self.start_time
@@ -195,6 +236,7 @@ class Prediction(models.Model):
     class Side(models.TextChoices):
         A = "A", "Team A"
         B = "B", "Team B"
+        DRAW = "D", "Draw"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,
@@ -235,6 +277,8 @@ class Prediction(models.Model):
             return str(self.match.team_a)
         if self.choice == self.Side.B:
             return str(self.match.team_b)
+        if self.choice == self.Side.DRAW:
+            return "Draw"
         return self.choice
 
     @property
