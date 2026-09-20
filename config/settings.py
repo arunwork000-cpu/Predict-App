@@ -188,7 +188,9 @@ MEDIA_ROOT = BASE_DIR / 'media'
 
 STORAGES = {
     'default': {
-        'BACKEND': 'django.core.files.storage.FileSystemStorage',
+        # Uploads (team flags) live in the database: the Railway disk is
+        # ephemeral. Served by predictions.views.media_file at /media/.
+        'BACKEND': 'predictions.storage.DatabaseStorage',
     },
     'staticfiles': {
         # Production: WhiteNoise compressed + hashed manifest storage.

@@ -2650,3 +2650,39 @@ class RetireLiveStatusMigrationTests(TestCase):
         ]:
             match.refresh_from_db()
             self.assertEqual(match.status, expected)
+
+
+class DatabaseFlagStorageTests(TestCase):
+    """Uploaded flags live in the database and are served from /media/."""
+
+    def setUp(self):
+        self.sport = Sport.objects.create(name="Storage Sport")
+
+    def test_uploaded_flag_is_stored_and_served_from_database(self):
+        from .models import StoredFile
+
+        team = Team.objects.create(name="Lions", sport=self.sport, flag=make_flag())
+        self.assertTrue(StoredFile.objects.filter(name=team.flag.name).exists())
+        response = self.client.get(team.flag.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "image/png")
+        self.assertEqual(response.content, TINY_PNG)
+        self.assertEqual(response["X-Content-Type-Options"], "nosniff")
+
+    def test_unknown_media_path_returns_404(self):
+        self.assertEqual(self.client.get("/media/team_flags/nope.png").status_code, 404)
+
+    def test_same_filename_does_not_overwrite_existing_flag(self):
+        a = Team.objects.create(name="A", sport=self.sport, flag=make_flag("f.png"))
+        b = Team.objects.create(name="B", sport=self.sport, flag=make_flag("f.png"))
+        self.assertNotEqual(a.flag.name, b.flag.name)
+        self.assertEqual(self.client.get(a.flag.url).status_code, 200)
+        self.assertEqual(self.client.get(b.flag.url).status_code, 200)
+
+    def test_deleting_flag_removes_stored_file(self):
+        from .models import StoredFile
+
+        team = Team.objects.create(name="Lions", sport=self.sport, flag=make_flag())
+        name = team.flag.name
+        team.flag.delete(save=True)
+        self.assertFalse(StoredFile.objects.filter(name=name).exists())

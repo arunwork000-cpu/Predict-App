@@ -4,14 +4,14 @@ from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.db.models import Sum
-from django.http import Http404
+from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 
 from .constants import DEFAULT_SPORT_SLUG, DRAW_SPORTS, SPORT_SLUGS, SUPPORTED_SPORTS
 from .forms import PredictionForm, RegistrationForm
 from .locations import STATES_BY_COUNTRY
-from .models import Match, Prediction, Profile, ScoreAdjustment
+from .models import Match, Prediction, Profile, ScoreAdjustment, StoredFile
 from .services import sync_match_statuses
 
 
@@ -267,3 +267,12 @@ def register(request):
         "predictions/register.html",
         {"form": form, "states_by_country_json": json.dumps(STATES_BY_COUNTRY)},
     )
+
+
+def media_file(request, path):
+    """Serve an uploaded file (e.g. a team flag) stored in the database."""
+    stored = get_object_or_404(StoredFile, name=path)
+    response = HttpResponse(bytes(stored.content), content_type=stored.content_type)
+    response["Cache-Control"] = "public, max-age=86400"
+    response["X-Content-Type-Options"] = "nosniff"
+    return response

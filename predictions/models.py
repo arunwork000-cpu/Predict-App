@@ -357,3 +357,19 @@ class ScoreAdjustment(models.Model):
     def __str__(self):
         sign = "+" if self.delta >= 0 else ""
         return f"{self.user} {sign}{self.delta} ({self.match})"
+
+
+class StoredFile(models.Model):
+    """An uploaded file kept in the database (see predictions.storage)."""
+
+    name = models.CharField(max_length=255, unique=True)
+    content = models.BinaryField()
+    content_type = models.CharField(max_length=100, default="application/octet-stream")
+    size = models.PositiveIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["name"]
+
+    def __str__(self):
+        return self.name
