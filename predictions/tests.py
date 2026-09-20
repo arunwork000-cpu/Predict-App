@@ -1,4 +1,5 @@
 import base64
+import json
 import os
 import re
 import shutil
@@ -2769,3 +2770,81 @@ class RegistrationEmailAgeTests(TestCase):
                 self.assertIn("*", label.group(1))
         email_label = re.search(r'<label[^>]*for="id_email"[^>]*>(.*?)</label>', content, re.S)
         self.assertNotIn("*", email_label.group(1))
+
+
+class MatchAdminTeamsBySportTests(TestCase):
+    """Match admin: team dropdowns follow the chosen sport."""
+
+    def setUp(self):
+        from .admin import MatchAdminForm
+
+        self.form_class = MatchAdminForm
+        self.football = Sport.objects.get(name="Football")
+        self.cricket = Sport.objects.get(name="Cricket")
+        self.f1 = Team.objects.create(name="F One", sport=self.football)
+        self.f2 = Team.objects.create(name="F Two", sport=self.football)
+        self.c1 = Team.objects.create(name="C One", sport=self.cricket)
+        self.c2 = Team.objects.create(name="C Two", sport=self.cricket)
+        self.admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(self.admin_user)
+
+    def _ids(self, form, field):
+        return set(form.fields[field].queryset.values_list("pk", flat=True))
+
+    def test_new_match_form_has_no_teams_until_a_sport_is_chosen(self):
+        form = self.form_class()
+        self.assertEqual(self._ids(form, "team_a"), set())
+        self.assertEqual(self._ids(form, "team_b"), set())
+        self.assertEqual(form.fields["team_a"].empty_label, "Select a sport first")
+
+    def test_bound_form_limits_teams_to_the_chosen_sport(self):
+        form = self.form_class({"sport": self.football.pk})
+        self.assertEqual(self._ids(form, "team_a"), {self.f1.pk, self.f2.pk})
+        self.assertEqual(self._ids(form, "team_b"), {self.f1.pk, self.f2.pk})
+
+    def test_existing_match_form_shows_its_sports_teams_and_two_winner_choices(self):
+        match = sport_match("Football", team_a=self.f1, team_b=self.f2)
+        form = self.form_class(instance=match)
+        self.assertEqual(self._ids(form, "team_a"), {self.f1.pk, self.f2.pk})
+        self.assertEqual(self._ids(form, "winner"), {self.f1.pk, self.f2.pk})
+
+    def test_team_from_another_sport_is_rejected(self):
+        now = timezone.now()
+        response = self.client.post(
+            reverse("admin:predictions_match_add"),
+            {
+                "sport": self.football.pk,
+                "event_name": "",
+                "team_a": self.f1.pk,
+                "team_b": self.c1.pk,  # a cricket team
+                "start_time_0": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "start_time_1": "12:00:00",
+                "prediction_deadline_0": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "prediction_deadline_1": "11:00:00",
+                "status": Match.Status.SCHEDULED,
+                "team_a_win_points": 10,
+                "team_a_lose_points": -5,
+                "team_b_win_points": 10,
+                "team_b_lose_points": -5,
+                "draw_win_points": 10,
+                "draw_lose_points": -5,
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Match.objects.exists())
+
+    def test_add_page_embeds_sport_to_teams_map_and_script(self):
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        self.assertContains(response, "predictions/admin/match_teams.js")
+        self.assertContains(response, "data-teams=")
+        mapping = json.loads(
+            re.search(r'data-teams="([^"]*)"', response.content.decode())
+            .group(1)
+            .replace("&quot;", '"')
+        )
+        self.assertEqual(
+            sorted(t[1] for t in mapping[str(self.football.pk)]), ["F One", "F Two"]
+        )
+        self.assertEqual(
+            sorted(t[1] for t in mapping[str(self.cricket.pk)]), ["C One", "C Two"]
+        )

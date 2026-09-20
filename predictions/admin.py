@@ -1,3 +1,6 @@
+import json
+
+from django import forms
 from django.contrib import admin, messages
 from django.utils.html import format_html
 
@@ -42,8 +45,74 @@ class ProfileAdmin(admin.ModelAdmin):
     fields = ("user", "points", "age", "country", "state")
 
 
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+class MatchAdminForm(forms.ModelForm):
+    """Match form whose team dropdowns follow the chosen sport.
+
+    Team A / Team B list only teams of the selected sport, and Winner lists
+    only the two chosen teams. The browser refills them when the sport
+    changes (static/predictions/admin/match_teams.js); the querysets here
+    make the server enforce the same rule.
+    """
+
+    class Meta:
+        model = Match
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        instance = self.instance
+
+        if self.is_bound:
+            sport_id = _int_or_none(self.data.get("sport"))
+            team_ids = [
+                _int_or_none(self.data.get("team_a")),
+                _int_or_none(self.data.get("team_b")),
+            ]
+        else:
+            sport_id = instance.sport_id or _int_or_none(self.initial.get("sport"))
+            team_ids = [instance.team_a_id, instance.team_b_id]
+
+        teams = (
+            Team.objects.filter(sport_id=sport_id)
+            if sport_id
+            else Team.objects.none()
+        )
+        self.fields["team_a"].queryset = teams
+        self.fields["team_b"].queryset = teams
+        empty = "---------" if sport_id else "Select a sport first"
+        self.fields["team_a"].empty_label = empty
+        self.fields["team_b"].empty_label = empty
+        self.fields["winner"].queryset = Team.objects.filter(
+            pk__in=[t for t in team_ids if t]
+        )
+
+        # sport -> [[team id, team name], ...] for the dropdown script.
+        by_sport = {}
+        for team_id, name, team_sport_id in Team.objects.values_list(
+            "id", "name", "sport_id"
+        ):
+            by_sport.setdefault(team_sport_id, []).append([team_id, name])
+        # The admin wraps FK widgets (add/change links); the <select> itself is
+        # the inner widget.
+        sport_widget = self.fields["sport"].widget
+        sport_widget = getattr(sport_widget, "widget", sport_widget)
+        sport_widget.attrs["data-teams"] = json.dumps(by_sport)
+
+
 @admin.register(Match)
 class MatchAdmin(admin.ModelAdmin):
+    form = MatchAdminForm
+
+    class Media:
+        js = ("predictions/admin/match_teams.js",)
+
     list_display = (
         "team_a",
         "team_b",
@@ -59,7 +128,8 @@ class MatchAdmin(admin.ModelAdmin):
     )
     list_filter = ("sport", "status", "is_draw", "is_published", "is_scored")
     search_fields = ("team_a__name", "team_b__name", "event_name")
-    autocomplete_fields = ("sport", "team_a", "team_b", "winner")
+    # sport/team_a/team_b/winner are plain dropdowns (not autocomplete) so
+    # they can be filtered by sport; see MatchAdminForm.
     date_hierarchy = "start_time"
     actions = ("publish_matches", "unpublish_matches")
     # is_scored is managed by the scoring service. winner stays editable even
