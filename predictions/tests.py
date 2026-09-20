@@ -2931,3 +2931,74 @@ class IndiaTimeZoneTests(TestCase):
                     for p in response.context["monthly_profiles"]
                 }
                 self.assertEqual(totals["indian"], 5)
+
+
+class AdminDateFormatTests(TestCase):
+    """Admin date fields use DD-MMM-YYYY (e.g. 10-Mar-2026)."""
+
+    def setUp(self):
+        self.admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(self.admin_user)
+        self.sport = Sport.objects.get(name="Football")
+        self.a = Team.objects.create(name="DA", sport=self.sport)
+        self.b = Team.objects.create(name="DB", sport=self.sport)
+
+    def _post(self, date_text):
+        return self.client.post(
+            reverse("admin:predictions_match_add"),
+            {
+                "sport": self.sport.pk,
+                "event_name": "",
+                "team_a": self.a.pk,
+                "team_b": self.b.pk,
+                "start_time_0": date_text,
+                "start_time_1": "18:00:00",
+                "prediction_deadline_0": date_text,
+                "prediction_deadline_1": "17:00:00",
+                "status": Match.Status.SCHEDULED,
+                "team_a_win_points": 10,
+                "team_a_lose_points": -5,
+                "team_b_win_points": 10,
+                "team_b_lose_points": -5,
+                "draw_win_points": 10,
+                "draw_lose_points": -5,
+            },
+        )
+
+    def test_change_page_shows_dates_as_dd_mmm_yyyy(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        when = datetime(2026, 3, 10, 10, 0, tzinfo=dt_timezone.utc)
+        match = future_match(start_time=when, prediction_deadline=when)
+        response = self.client.get(
+            reverse("admin:predictions_match_change", args=[match.pk])
+        )
+        self.assertContains(response, 'name="start_time_0" value="10-Mar-2026"')
+        self.assertContains(response, 'name="prediction_deadline_0" value="10-Mar-2026"')
+
+    def test_dd_mmm_yyyy_input_is_accepted(self):
+        response = self._post("10-Jan-2030")
+        self.assertEqual(response.status_code, 302)
+        match = Match.objects.get(team_a=self.a)
+        # 18:00 IST on 10 Jan 2030 is 12:30 UTC the same day.
+        self.assertEqual(
+            (match.start_time.year, match.start_time.month, match.start_time.day),
+            (2030, 1, 10),
+        )
+
+    def test_iso_input_is_still_accepted(self):
+        self.assertEqual(self._post("2030-01-10").status_code, 302)
+        self.assertTrue(Match.objects.filter(team_a=self.a).exists())
+
+    def test_invalid_month_name_is_rejected(self):
+        response = self._post("31-Foo-2030")
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(Match.objects.exists())
+
+    def test_admin_list_shows_dd_mmm_yyyy(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        when = datetime(2026, 3, 10, 10, 0, tzinfo=dt_timezone.utc)
+        future_match(start_time=when, prediction_deadline=when)
+        response = self.client.get(reverse("admin:predictions_match_changelist"))
+        self.assertContains(response, "10-Mar-2026, 15:30")

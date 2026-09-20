@@ -168,6 +168,9 @@ AUTH_PASSWORD_VALIDATORS = [
 
 LANGUAGE_CODE = 'en-us'
 
+# Custom date formats (DD-MMM-YYYY in the admin); see config/formats/en/.
+FORMAT_MODULE_PATH = ['config.formats']
+
 # Site time zone: the admin enters match times in it, and it is the fallback
 # for visitors whose browser zone is unknown. Datetimes are still stored in UTC
 # (USE_TZ). The monthly leaderboard month is also cut in this zone.
