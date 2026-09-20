@@ -1784,7 +1784,7 @@ class SportMatchesViewTests(TestCase):
 
         self.assertContains(response, "Predicted")
         self.assertContains(response, "If win get:")
-        self.assertContains(response, "If lose get:")
+        self.assertContains(response, "If Lose/Draw get:")
 
     def test_open_match_shows_predict_the_win_label(self):
         sport_match("Cricket", "CA cta", "CB cta")
@@ -1837,7 +1837,7 @@ class SportMatchesViewTests(TestCase):
 
         self.assertNotContains(response, "<form")
         self.assertContains(response, "If win get:")
-        self.assertContains(response, "If lose get:")
+        self.assertContains(response, "If Lose/Draw get:")
 
     def test_guest_sees_login_to_predict_and_not_the_predict_link(self):
         match = sport_match("Football", "FA guest", "FB guest")
@@ -3002,3 +3002,25 @@ class AdminDateFormatTests(TestCase):
         future_match(start_time=when, prediction_deadline=when)
         response = self.client.get(reverse("admin:predictions_match_changelist"))
         self.assertContains(response, "10-Mar-2026, 15:30")
+
+
+class LoseDrawLabelTests(TestCase):
+    """Team boxes say "If Lose/Draw get" only where a draw is possible."""
+
+    def _page(self, sport_name):
+        sport_match(sport_name, "TA", "TB")
+        return self.client.get(reverse("sport_matches", args=[sport_name.lower()]))
+
+    def test_draw_sports_use_lose_draw_label(self):
+        for sport_name in ("Football", "Cricket", "Hockey"):
+            with self.subTest(sport=sport_name):
+                response = self._page(sport_name)
+                self.assertContains(response, "If Lose/Draw get:")
+                self.assertNotContains(response, "If lose get:")
+
+    def test_sports_without_draws_keep_lose_label(self):
+        for sport_name in ("Tennis", "Badminton"):
+            with self.subTest(sport=sport_name):
+                response = self._page(sport_name)
+                self.assertContains(response, "If lose get:")
+                self.assertNotContains(response, "Lose/Draw")

@@ -29,7 +29,7 @@
                           class="btn w-100 h-100 pick-btn {% if match.user_pick.choice == 'A' %}btn-primary{% else %}btn-outline-primary{% endif %}">
                     <div class="fw-bold">{% team_flag match.team_a %}{{ match.team_a }}</div>
                     <div class="small">If win get: {{ match.team_a_win_points }}</div>
-                    <div class="small">If lose get: {{ match.team_a_lose_points }}</div>
+                    <div class="small">{% if match.allows_draw %}If Lose/Draw get{% else %}If lose get{% endif %}: {{ match.team_a_lose_points }}</div>
                     {% if match.user_pick.choice == 'A' %}
                       <div class="small mt-1"><span class="badge text-bg-light text-primary">Predicted</span></div>
                     {% endif %}
@@ -39,7 +39,7 @@
                 <div class="border rounded p-2 h-100">
                   <div class="fw-bold">{% team_flag match.team_a %}{{ match.team_a }}</div>
                   <div class="small text-muted">If win get: {{ match.team_a_win_points }}</div>
-                  <div class="small text-muted">If lose get: {{ match.team_a_lose_points }}</div>
+                  <div class="small text-muted">{% if match.allows_draw %}If Lose/Draw get{% else %}If lose get{% endif %}: {{ match.team_a_lose_points }}</div>
                 </div>
               {% endif %}
             </div>
@@ -52,7 +52,7 @@
                           class="btn w-100 h-100 pick-btn {% if match.user_pick.choice == 'B' %}btn-primary{% else %}btn-outline-primary{% endif %}">
                     <div class="fw-bold">{% team_flag match.team_b %}{{ match.team_b }}</div>
                     <div class="small">If win get: {{ match.team_b_win_points }}</div>
-                    <div class="small">If lose get: {{ match.team_b_lose_points }}</div>
+                    <div class="small">{% if match.allows_draw %}If Lose/Draw get{% else %}If lose get{% endif %}: {{ match.team_b_lose_points }}</div>
                     {% if match.user_pick.choice == 'B' %}
                       <div class="small mt-1"><span class="badge text-bg-light text-primary">Predicted</span></div>
                     {% endif %}
@@ -62,7 +62,7 @@
                 <div class="border rounded p-2 h-100">
                   <div class="fw-bold">{% team_flag match.team_b %}{{ match.team_b }}</div>
                   <div class="small text-muted">If win get: {{ match.team_b_win_points }}</div>
-                  <div class="small text-muted">If lose get: {{ match.team_b_lose_points }}</div>
+                  <div class="small text-muted">{% if match.allows_draw %}If Lose/Draw get{% else %}If lose get{% endif %}: {{ match.team_b_lose_points }}</div>
                 </div>
               {% endif %}
             </div>
