@@ -1615,6 +1615,21 @@ class LeaderboardMedalTests(TestCase):
         self.assertNotIn("silver.svg", row)
         self.assertNotIn("bronze.svg", row)
 
+    def test_medal_appears_after_the_points_in_the_row(self):
+        for index in range(3):
+            user = User.objects.create_user(f"player{index}", password="pass12345")
+            Profile.objects.filter(user=user).update(points=100 - index * 10)
+
+        content = self.client.get(reverse("leaderboard")).content.decode()
+
+        for section in ("all-time", "monthly"):
+            row = self._row_for(content, "player0", section)
+            points_cell = row[row.rindex("<td>"):]
+            before_medal = points_cell[: points_cell.index("<img")]
+            # The points number comes first, then the medal image ends the cell.
+            self.assertRegex(before_medal, r"\d")
+            self.assertEqual(points_cell.count("<img"), 1)
+
     def test_all_time_leaderboard_shows_medals_only_for_top_three(self):
         for index in range(4):
             user = User.objects.create_user(f"player{index}", password="pass12345")
