@@ -62,7 +62,7 @@ class Team(models.Model):
 class Match(models.Model):
     class Status(models.TextChoices):
         SCHEDULED = "scheduled", "Scheduled"
-        LIVE = "live", "Live"
+        AWAITING_RESULT = "awaiting_result", "Awaiting result"
         FINISHED = "finished", "Finished"
         CANCELLED = "cancelled", "Cancelled"
 
@@ -194,6 +194,20 @@ class Match(models.Model):
         if choice == "A":
             return self.team_a_win_points if winning_side == "A" else self.team_a_lose_points
         return self.team_b_win_points if winning_side == "B" else self.team_b_lose_points
+
+    def save(self, *args, **kwargs):
+        # Entering a result (winner or draw) means the match is over, so a
+        # scheduled/awaiting-result match moves to Finished automatically.
+        # Cancelled and already-finished matches are left alone.
+        if self.has_result and self.status in (
+            self.Status.SCHEDULED,
+            self.Status.AWAITING_RESULT,
+        ):
+            self.status = self.Status.FINISHED
+            update_fields = kwargs.get("update_fields")
+            if update_fields is not None and "status" not in update_fields:
+                kwargs["update_fields"] = [*update_fields, "status"]
+        super().save(*args, **kwargs)
 
     def clean(self):
         errors = {}

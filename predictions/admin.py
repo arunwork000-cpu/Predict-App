@@ -2,7 +2,7 @@ from django.contrib import admin, messages
 from django.utils.html import format_html
 
 from .models import Match, Prediction, Profile, ScoreAdjustment, Sport, Team
-from .services import score_match
+from .services import score_match, sync_match_statuses
 
 
 @admin.register(Sport)
@@ -97,6 +97,11 @@ class MatchAdmin(admin.ModelAdmin):
             ),
         }),
     )
+
+    def get_queryset(self, request):
+        # Past-deadline Scheduled matches show as Awaiting result here too.
+        sync_match_statuses()
+        return super().get_queryset(request)
 
     @admin.action(description="Publish selected matches")
     def publish_matches(self, request, queryset):

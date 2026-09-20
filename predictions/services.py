@@ -1,5 +1,6 @@
 from django.db import transaction
 from django.db.models import F
+from django.utils import timezone
 
 from .models import Match, Profile, ScoreAdjustment
 
@@ -8,6 +9,22 @@ from .models import Match, Profile, ScoreAdjustment
 # each match's own team_a/team_b win/lose point fields instead.
 POINTS_CORRECT = 10
 POINTS_WRONG = -5
+
+
+def sync_match_statuses():
+    """Move Scheduled matches whose prediction deadline has passed (and that
+    have no result yet) to Awaiting result. Returns the number updated.
+
+    Cheap and idempotent (one conditional UPDATE), so it is called wherever
+    match status is shown -- public match pages and the admin -- instead of
+    needing a background job.
+    """
+    return Match.objects.filter(
+        status=Match.Status.SCHEDULED,
+        prediction_deadline__lte=timezone.now(),
+        winner__isnull=True,
+        is_draw=False,
+    ).update(status=Match.Status.AWAITING_RESULT)
 
 
 def score_match(match_id):

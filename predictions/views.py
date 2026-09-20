@@ -12,6 +12,7 @@ from .constants import DEFAULT_SPORT_SLUG, DRAW_SPORTS, SPORT_SLUGS, SUPPORTED_S
 from .forms import PredictionForm, RegistrationForm
 from .locations import STATES_BY_COUNTRY
 from .models import Match, Prediction, Profile, ScoreAdjustment
+from .services import sync_match_statuses
 
 
 def _attach_user_picks(request, matches):
@@ -46,6 +47,7 @@ def sport_matches(request, sport_slug):
     if sport_name is None:
         raise Http404("Unknown sport.")
 
+    sync_match_statuses()
     matches = list(
         Match.objects.filter(is_published=True, sport__name=sport_name).select_related(
             "team_a", "team_b", "sport", "winner"
@@ -68,7 +70,8 @@ def sport_matches(request, sport_slug):
 
 def closed_matches_view(request):
     """Public page listing every published, no-longer-open match across the
-    four supported sports (finished, live, cancelled, or deadline-passed)."""
+    four supported sports (finished, awaiting result, cancelled, or deadline-passed)."""
+    sync_match_statuses()
     matches = list(
         Match.objects.filter(
             is_published=True, sport__name__in=SUPPORTED_SPORTS
@@ -87,6 +90,7 @@ def closed_matches_view(request):
 
 def match_detail(request, pk):
     """Read-only page for a single published match and its status."""
+    sync_match_statuses()
     match = get_object_or_404(
         Match.objects.select_related("sport", "team_a", "team_b", "winner"),
         pk=pk,
@@ -97,8 +101,8 @@ def match_detail(request, pk):
         state = "cancelled"
     elif match.has_result:
         state = "completed"
-    elif match.status == Match.Status.LIVE:
-        state = "live"
+    elif match.status == Match.Status.AWAITING_RESULT:
+        state = "awaiting"
     elif match.predictions_open:
         state = "open"
     else:
@@ -164,6 +168,7 @@ def predict(request, pk):
 
 @login_required
 def my_predictions(request):
+    sync_match_statuses()
     predictions = (
         Prediction.objects.filter(user=request.user)
         .select_related(

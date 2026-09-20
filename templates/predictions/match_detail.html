@@ -9,8 +9,8 @@
     <h1 class="h3 mb-0">{% team_flag match.team_a %}{{ match.team_a }} vs {% team_flag match.team_b %}{{ match.team_b }}</h1>
     {% if state == "open" %}
       <span class="badge text-bg-success">Open</span>
-    {% elif state == "live" %}
-      <span class="badge text-bg-warning">Live</span>
+    {% elif state == "awaiting" %}
+      <span class="badge text-bg-info">Awaiting result</span>
     {% elif state == "locked" %}
       <span class="badge text-bg-secondary">Locked</span>
     {% elif state == "completed" %}

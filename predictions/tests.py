@@ -1177,10 +1177,10 @@ class MyPredictionsViewTests(TestCase):
         self.assertNotContains(response, "Hit")
         self.assertNotContains(response, "Miss")
 
-    def test_live_match_prediction_shows_live_badge_and_stays_pending(self):
-        match = self._match("live")
+    def test_awaiting_result_prediction_shows_badge_and_stays_pending(self):
+        match = self._match("awaiting")
         Prediction.objects.create(user=self.alice, match=match, choice="A")
-        match.status = Match.Status.LIVE
+        match.status = Match.Status.AWAITING_RESULT
         match.save()
 
         self.client.login(username="alice", password="pass12345")
@@ -1199,7 +1199,7 @@ class MyPredictionsViewTests(TestCase):
         self.assertIsNone(prediction.is_correct)
         self.assertIsNone(prediction.points_earned)
 
-        self.assertContains(response, "Live")
+        self.assertContains(response, "Awaiting result")
         self.assertNotContains(response, "Hit")
         self.assertNotContains(response, "Miss")
 
@@ -1261,15 +1261,15 @@ class MatchDetailViewTests(TestCase):
         self.assertContains(response, "Open")
         self.assertContains(response, reverse("predict", args=[match.pk]))
 
-    def test_locked_match_shows_locked_and_no_predict_link(self):
+    def test_past_deadline_match_shows_awaiting_result_and_no_predict_link(self):
         match = self._match(
             "locked",
             start_time=timezone.now() - timedelta(minutes=5),
             prediction_deadline=timezone.now() - timedelta(hours=1),
         )
         response = self.client.get(reverse("match_detail", args=[match.pk]))
-        self.assertEqual(response.context["state"], "locked")
-        self.assertContains(response, "Locked")
+        self.assertEqual(response.context["state"], "awaiting")
+        self.assertContains(response, "Awaiting result")
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
     def test_cancelled_match_shows_cancelled_and_no_predict_link(self):
@@ -1279,11 +1279,11 @@ class MatchDetailViewTests(TestCase):
         self.assertContains(response, "Cancelled")
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
-    def test_live_match_shows_live_state(self):
-        match = self._match("live", status=Match.Status.LIVE)
+    def test_awaiting_result_match_shows_awaiting_state(self):
+        match = self._match("awaiting", status=Match.Status.AWAITING_RESULT)
         response = self.client.get(reverse("match_detail", args=[match.pk]))
-        self.assertEqual(response.context["state"], "live")
-        self.assertContains(response, "Live")
+        self.assertEqual(response.context["state"], "awaiting")
+        self.assertContains(response, "Awaiting result")
         self.assertNotContains(response, "Locked")
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
@@ -1888,7 +1888,8 @@ class ClosedMatchesViewTests(TestCase):
         response = self.client.get(reverse("closed_matches"))
 
         self.assertContains(response, "CA locked")
-        self.assertContains(response, "Predictions locked. Winner not entered yet.")
+        self.assertContains(response, "Awaiting result")
+        self.assertContains(response, "The result has not been entered yet.")
 
     def test_finished_scored_match_is_shown_with_winner_and_scored_badge(self):
         match = sport_match("Tennis", "TA scored", "TB scored")
@@ -1912,13 +1913,15 @@ class ClosedMatchesViewTests(TestCase):
         self.assertContains(response, "Cancelled")
         self.assertContains(response, "no result will be recorded")
 
-    def test_live_match_is_shown(self):
-        sport_match("Football", "FA live", "FB live", status=Match.Status.LIVE)
+    def test_awaiting_result_match_is_shown(self):
+        sport_match(
+            "Football", "FA wait", "FB wait", status=Match.Status.AWAITING_RESULT
+        )
 
         response = self.client.get(reverse("closed_matches"))
 
-        self.assertContains(response, "Live")
-        self.assertContains(response, "in progress")
+        self.assertContains(response, "Awaiting result")
+        self.assertContains(response, "The result has not been entered yet")
 
     def test_shows_matches_from_every_supported_sport(self):
         sport_match("Cricket", "CA multi", "CB multi", **self._past_deadline_kwargs())
@@ -2463,3 +2466,187 @@ class DrawTests(TestCase):
         response = self.client.get(reverse("sport_matches", args=["football"]))
         self.assertContains(response, "If Draw get: 15")
         self.assertContains(response, "If Win/Lose get: -3")
+
+
+class AutoFinishedStatusTests(TestCase):
+    """Entering a result moves a Scheduled/Live match to Finished."""
+
+    def test_winner_marks_scheduled_match_finished(self):
+        match = sport_match("Football")
+        self.assertEqual(match.status, Match.Status.SCHEDULED)
+        match.winner = match.team_a
+        match.save()
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.FINISHED)
+
+    def test_draw_marks_awaiting_match_finished(self):
+        match = sport_match("Cricket", status=Match.Status.AWAITING_RESULT)
+        match.is_draw = True
+        match.save()
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.FINISHED)
+
+    def test_no_result_leaves_status_alone(self):
+        match = sport_match("Hockey")
+        match.event_name = "Cup"
+        match.save()
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.SCHEDULED)
+
+    def test_cancelled_match_stays_cancelled(self):
+        match = sport_match("Football", status=Match.Status.CANCELLED)
+        match.winner = match.team_a
+        match.save()
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.CANCELLED)
+
+    def test_save_with_update_fields_still_persists_status(self):
+        match = sport_match("Football")
+        match.winner = match.team_a
+        match.save(update_fields=["winner"])
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.FINISHED)
+
+    def test_admin_entering_result_finishes_match(self):
+        admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(admin_user)
+        match = sport_match("Football")
+        now = timezone.now()
+        response = self.client.post(
+            reverse("admin:predictions_match_change", args=[match.pk]),
+            {
+                "sport": match.sport_id,
+                "event_name": "",
+                "team_a": match.team_a_id,
+                "team_b": match.team_b_id,
+                "start_time_0": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "start_time_1": "12:00:00",
+                "prediction_deadline_0": (now + timedelta(days=1)).strftime("%Y-%m-%d"),
+                "prediction_deadline_1": "11:00:00",
+                "status": Match.Status.SCHEDULED,
+                "winner": match.team_a_id,
+                "is_published": "on",
+                "team_a_win_points": 10,
+                "team_a_lose_points": -5,
+                "team_b_win_points": 10,
+                "team_b_lose_points": -5,
+                "draw_win_points": 10,
+                "draw_lose_points": -5,
+            },
+        )
+        self.assertEqual(response.status_code, 302)
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.FINISHED)
+        self.assertTrue(match.is_scored)
+
+
+class AwaitingResultStatusTests(TestCase):
+    """Scheduled matches past their prediction deadline become Awaiting result."""
+
+    def _past_match(self, **kwargs):
+        now = timezone.now()
+        return sport_match(
+            "Football",
+            start_time=now - timedelta(hours=3),
+            prediction_deadline=now - timedelta(hours=3),
+            **kwargs,
+        )
+
+    def test_sync_moves_past_deadline_scheduled_match(self):
+        from .services import sync_match_statuses
+
+        past = self._past_match()
+        future = sport_match("Football", team_a_name="X", team_b_name="Y")
+        self.assertEqual(sync_match_statuses(), 1)
+        past.refresh_from_db()
+        future.refresh_from_db()
+        self.assertEqual(past.status, Match.Status.AWAITING_RESULT)
+        self.assertEqual(future.status, Match.Status.SCHEDULED)
+        self.assertEqual(sync_match_statuses(), 0)  # idempotent
+
+    def test_sync_ignores_cancelled_and_finished_matches(self):
+        from .services import sync_match_statuses
+
+        finished = self._past_match(status=Match.Status.FINISHED)
+        cancelled = sport_match(
+            "Football",
+            team_a_name="C1",
+            team_b_name="C2",
+            status=Match.Status.CANCELLED,
+            start_time=timezone.now() - timedelta(hours=3),
+            prediction_deadline=timezone.now() - timedelta(hours=3),
+        )
+        sync_match_statuses()
+        finished.refresh_from_db()
+        cancelled.refresh_from_db()
+        self.assertEqual(finished.status, Match.Status.FINISHED)
+        self.assertEqual(cancelled.status, Match.Status.CANCELLED)
+
+    def test_public_pages_trigger_sync_and_show_badge(self):
+        match = self._past_match()
+        response = self.client.get(reverse("match_detail", args=[match.pk]))
+        self.assertContains(response, "Awaiting result")
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.AWAITING_RESULT)
+        response = self.client.get(reverse("closed_matches"))
+        self.assertContains(response, "The result has not been entered yet")
+
+    def test_admin_list_shows_awaiting_result(self):
+        self._past_match()
+        admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(admin_user)
+        response = self.client.get(reverse("admin:predictions_match_changelist"))
+        self.assertContains(response, "Awaiting result")
+
+    def test_entering_result_finishes_awaiting_match(self):
+        from .services import sync_match_statuses
+
+        match = self._past_match()
+        sync_match_statuses()
+        match.refresh_from_db()
+        match.winner = match.team_a
+        match.save()
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.FINISHED)
+
+    def test_open_match_is_not_affected(self):
+        match = sport_match("Football")
+        self.client.get(reverse("sport_matches", args=["football"]))
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.SCHEDULED)
+        self.assertTrue(match.predictions_open)
+
+
+class RetireLiveStatusMigrationTests(TestCase):
+    """0012 converts leftover Live matches to a status that still exists."""
+
+    def test_live_rows_are_converted(self):
+        import importlib
+
+        from django.apps import apps as django_apps
+
+        migration = importlib.import_module(
+            "predictions.migrations.0012_match_awaiting_result"
+        )
+        now = timezone.now()
+        open_live = sport_match("Football", "OpenA", "OpenB")
+        past_live = sport_match(
+            "Football", "PastA", "PastB",
+            start_time=now - timedelta(hours=3),
+            prediction_deadline=now - timedelta(hours=3),
+        )
+        done_live = sport_match("Football", "DoneA", "DoneB")
+        Match.objects.filter(pk__in=[open_live.pk, past_live.pk, done_live.pk]).update(
+            status="live"
+        )
+        Match.objects.filter(pk=done_live.pk).update(winner=done_live.team_a)
+
+        migration.mark_awaiting_result(django_apps, None)
+
+        for match, expected in [
+            (open_live, "scheduled"),
+            (past_live, "awaiting_result"),
+            (done_live, "finished"),
+        ]:
+            match.refresh_from_db()
+            self.assertEqual(match.status, expected)

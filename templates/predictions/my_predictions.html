@@ -21,8 +21,8 @@
           <tr>
             <td>
               {% team_flag p.match.team_a %}{{ p.match.team_a }} vs {% team_flag p.match.team_b %}{{ p.match.team_b }}
-              {% if p.match.status == "live" %}
-                <span class="badge text-bg-warning">Live</span>
+              {% if p.match.status == "awaiting_result" %}
+                <span class="badge text-bg-info">Awaiting result</span>
               {% endif %}
             </td>
             <td>{{ p.choice_name }}</td>
