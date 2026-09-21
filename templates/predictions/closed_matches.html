@@ -10,7 +10,7 @@
     {% for match in closed_matches %}
       <div class="list-group-item">
         <div class="d-flex justify-content-between align-items-start gap-2 flex-wrap">
-          <strong><a href="{% url 'match_detail' match.pk %}">{% team_flag match.team_a %}{{ match.team_a }} vs {% team_flag match.team_b %}{{ match.team_b }}</a></strong>
+          <strong><a href="{% url 'match_detail' match.pk %}">{% team_flag match.team_a %}{{ match.team_a }}</a> Vs <a href="{% url 'match_detail' match.pk %}">{% team_flag match.team_b %}{{ match.team_b }}</a></strong>
           <span class="badge text-bg-light text-dark border">{{ match.sport }}</span>
         </div>
         {% if match.event_name %}
@@ -26,7 +26,7 @@
             {% if match.is_scored %}<span class="badge text-bg-secondary">Scored</span>{% endif %}
           {% elif match.status == "awaiting_result" %}
             <span class="badge text-bg-info">Awaiting result</span>
-            Match completed. The result has not been entered yet.
+            The result has not been entered yet.
           {% else %}
             Predictions locked. Winner not entered yet.
           {% endif %}

@@ -26,7 +26,7 @@ from .constants import SUPPORTED_SPORTS
 from .locations import STATES_BY_COUNTRY
 from .models import Match, Prediction, Profile, ScoreAdjustment, Sport, Team
 from .services import POINTS_CORRECT, POINTS_WRONG, score_match
-from .templatetags.prediction_extras import team_flag
+from .templatetags.prediction_extras import signed_points, team_flag
 
 # A valid 1x1 transparent PNG, used as dummy upload data for flag tests.
 TINY_PNG = base64.b64decode(
@@ -1791,7 +1791,9 @@ class SportMatchesViewTests(TestCase):
 
         response = self.client.get(reverse("sport_matches", args=["cricket"]))
 
-        self.assertContains(response, "Predict the Win")
+        self.assertContains(
+            response, "Predict the win ( Select your Team / Player )"
+        )
 
     def test_open_match_shows_team_win_lose_points(self):
         match = sport_match("Tennis", "TA points", "TB points")
@@ -1803,10 +1805,10 @@ class SportMatchesViewTests(TestCase):
 
         response = self.client.get(reverse("sport_matches", args=["tennis"]))
 
-        self.assertContains(response, "If win get: 20")
-        self.assertContains(response, "If lose get: -8")
-        self.assertContains(response, "If win get: 15")
-        self.assertContains(response, "If lose get: -3")
+        self.assertContains(response, "If win get: <strong>+20</strong>")
+        self.assertContains(response, "If lose get: <strong>-8</strong>")
+        self.assertContains(response, "If win get: <strong>+15</strong>")
+        self.assertContains(response, "If lose get: <strong>-3</strong>")
 
     def test_authenticated_user_can_predict_directly_from_a_sport_page(self):
         match = sport_match("Badminton", "BA inline", "BB inline")
@@ -1858,7 +1860,7 @@ class SportMatchesViewTests(TestCase):
         content = response.content.decode()
 
         self.assertIn("World Cup", content)
-        self.assertLess(content.index("Predict the Win"), content.index("World Cup"))
+        self.assertLess(content.index("Predict the win ("), content.index("World Cup"))
 
     def test_blank_event_name_shows_no_empty_label_or_spacing(self):
         sport_match("Football", "FA noevent", "FB noevent")
@@ -2481,8 +2483,66 @@ class DrawTests(TestCase):
     def test_draw_box_uses_plain_language_labels(self):
         sport_match("Football", draw_win_points=15, draw_lose_points=-3)
         response = self.client.get(reverse("sport_matches", args=["football"]))
-        self.assertContains(response, "If Draw get: 15")
-        self.assertContains(response, "If Win/Lose get: -3")
+        self.assertContains(response, "If Draw get: <strong>+15</strong>")
+        self.assertContains(response, "If Win/Lose get: <strong>-3</strong>")
+
+
+class NoDrawMatchTests(TestCase):
+    """Draw points of 0 and 0 mean the match cannot be drawn: hide the Draw box."""
+
+    def setUp(self):
+        self.alice = User.objects.create_user("alice", password="pass12345")
+        self.client.force_login(self.alice)
+
+    def test_zero_zero_draw_points_hide_draw_box(self):
+        for sport_name in ("Football", "Cricket", "Hockey"):
+            with self.subTest(sport=sport_name):
+                sport_match(sport_name, draw_win_points=0, draw_lose_points=0)
+                response = self.client.get(
+                    reverse("sport_matches", args=[sport_name.lower()])
+                )
+                self.assertNotContains(response, 'value="D"')
+                self.assertNotContains(response, "If Draw get")
+                self.assertNotContains(response, "Lose/Draw")
+                self.assertContains(response, "If lose get:")
+                self.assertContains(response, "col-6")
+                self.assertNotContains(response, "col-4")
+
+    def test_one_nonzero_draw_point_still_shows_draw_box(self):
+        for win, lose in ((5, 0), (0, -3)):
+            with self.subTest(win=win, lose=lose):
+                match = sport_match(
+                    "Football",
+                    f"TA {win}",
+                    f"TB {win}",
+                    draw_win_points=win,
+                    draw_lose_points=lose,
+                )
+                response = self.client.get(reverse("sport_matches", args=["football"]))
+                self.assertContains(response, 'value="D"')
+                match.delete()
+
+    def test_draw_pick_rejected_when_draw_points_zero(self):
+        match = sport_match("Football", draw_win_points=0, draw_lose_points=0)
+        self.client.post(reverse("predict", args=[match.pk]), {"choice": "D"})
+        self.assertFalse(Prediction.objects.filter(user=self.alice).exists())
+
+    def test_team_picks_still_work_when_draw_points_zero(self):
+        match = sport_match("Cricket", draw_win_points=0, draw_lose_points=0)
+        self.client.post(reverse("predict", args=[match.pk]), {"choice": "A"})
+        self.assertEqual(Prediction.objects.get(user=self.alice).choice, "A")
+
+    def test_match_can_mix_draw_and_no_draw(self):
+        sport_match("Football", "TA1", "TB1", draw_win_points=0, draw_lose_points=0)
+        sport_match("Football", "TA2", "TB2")
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+        self.assertContains(response, 'value="D"', count=1)
+
+    def test_cannot_mark_result_as_draw_when_draw_points_zero(self):
+        match = sport_match("Football", draw_win_points=0, draw_lose_points=0)
+        match.is_draw = True
+        with self.assertRaises(ValidationError):
+            match.full_clean()
 
 
 class AutoFinishedStatusTests(TestCase):
@@ -2833,6 +2893,52 @@ class MatchAdminTeamsBySportTests(TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertFalse(Match.objects.exists())
 
+    def test_add_page_loads_deadline_script_and_keeps_fields_editable(self):
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        self.assertContains(response, "predictions/admin/match_deadline.js")
+        self.assertContains(response, "predictions/admin/match_tomorrow.js")
+        html = response.content.decode()
+        for field in (
+            "start_time_0",
+            "start_time_1",
+            "prediction_deadline_0",
+            "prediction_deadline_1",
+        ):
+            with self.subTest(field=field):
+                tag = re.search(rf'<input[^>]*id="id_{field}"[^>]*>', html).group(0)
+                self.assertNotIn("readonly", tag)
+                self.assertNotIn("disabled", tag)
+
+    def test_deadline_can_differ_from_start_time(self):
+        day = (timezone.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+        self.client.post(
+            reverse("admin:predictions_match_add"),
+            {
+                "sport": self.football.pk,
+                "event_name": "",
+                "team_a": self.f1.pk,
+                "team_b": self.f2.pk,
+                "start_time_0": day,
+                "start_time_1": "12:00:00",
+                "prediction_deadline_0": day,
+                "prediction_deadline_1": "11:00:00",
+                "status": Match.Status.SCHEDULED,
+                "team_a_win_points": 10,
+                "team_a_lose_points": -5,
+                "team_b_win_points": 10,
+                "team_b_lose_points": -5,
+                "draw_win_points": 10,
+                "draw_lose_points": -5,
+            },
+        )
+        match = Match.objects.get()
+        self.assertEqual(
+            timezone.localtime(match.start_time).strftime("%H:%M"), "12:00"
+        )
+        self.assertEqual(
+            timezone.localtime(match.prediction_deadline).strftime("%H:%M"), "11:00"
+        )
+
     def test_add_page_embeds_sport_to_teams_map_and_script(self):
         response = self.client.get(reverse("admin:predictions_match_add"))
         self.assertContains(response, "predictions/admin/match_teams.js")
@@ -3024,3 +3130,58 @@ class LoseDrawLabelTests(TestCase):
                 response = self._page(sport_name)
                 self.assertContains(response, "If lose get:")
                 self.assertNotContains(response, "Lose/Draw")
+
+
+class MatchTitleAndPointsMarkupTests(TestCase):
+    """Separate team links with a plain "Vs", and bold signed points."""
+
+    def test_signed_points_filter(self):
+        self.assertEqual(signed_points(10), "+10")
+        self.assertEqual(signed_points(-5), "-5")
+        self.assertEqual(signed_points(0), "0")
+
+    def test_sport_page_links_each_team_separately_with_plain_vs(self):
+        match = sport_match("Football", "TA link", "TB link")
+        url = reverse("match_detail", args=[match.pk])
+
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+
+        self.assertContains(
+            response, f'<a href="{url}">TA link</a> Vs <a href="{url}">TB link</a>'
+        )
+        self.assertNotContains(response, "TA link vs")
+
+    def test_closed_matches_links_each_team_separately_with_plain_vs(self):
+        match = sport_match(
+            "Football",
+            "CA link",
+            "CB link",
+            start_time=timezone.now() - timedelta(minutes=5),
+            prediction_deadline=timezone.now() - timedelta(hours=1),
+        )
+        url = reverse("match_detail", args=[match.pk])
+
+        response = self.client.get(reverse("closed_matches"))
+
+        self.assertContains(
+            response, f'<a href="{url}">CA link</a> Vs <a href="{url}">CB link</a>'
+        )
+
+    def test_points_are_bold_and_signed_for_guests_and_users(self):
+        sport_match(
+            "Football",
+            team_a_win_points=10,
+            team_a_lose_points=-5,
+            draw_win_points=7,
+            draw_lose_points=-2,
+        )
+        User.objects.create_user("alice", password="pass12345")
+        for logged_in in (False, True):
+            with self.subTest(logged_in=logged_in):
+                if logged_in:
+                    self.client.login(username="alice", password="pass12345")
+                response = self.client.get(reverse("sport_matches", args=["football"]))
+                self.assertContains(response, "If win get: <strong>+10</strong>")
+                self.assertContains(response, "If Lose/Draw get: <strong>-5</strong>")
+                self.assertContains(response, "If Draw get: <strong>+7</strong>")
+                self.assertContains(response, "If Win/Lose get: <strong>-2</strong>")

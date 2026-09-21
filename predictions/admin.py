@@ -111,7 +111,11 @@ class MatchAdmin(admin.ModelAdmin):
     form = MatchAdminForm
 
     class Media:
-        js = ("predictions/admin/match_teams.js",)
+        js = (
+            "predictions/admin/match_teams.js",
+            "predictions/admin/match_deadline.js",
+            "predictions/admin/match_tomorrow.js",
+        )
 
     list_display = (
         "team_a",
@@ -163,7 +167,9 @@ class MatchAdmin(admin.ModelAdmin):
             ),
             "description": (
                 "Points awarded for a correct/incorrect pick. Defaults: win 10, lose -5. "
-                "The Draw points apply only to Football, Cricket and Hockey."
+                "The Draw points apply only to Football, Cricket and Hockey. "
+                "Enter 0 in both Draw fields if the match cannot end in a draw: "
+                "the Draw box is then hidden and users pick only Team A or Team B."
             ),
         }),
     )

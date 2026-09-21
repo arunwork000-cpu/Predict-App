@@ -164,8 +164,14 @@ class Match(models.Model):
 
     @property
     def allows_draw(self):
-        """True for sports where a match can end level (offers a Draw pick)."""
-        return self.sport.name in DRAW_SPORTS
+        """True if this match offers a Draw pick.
+
+        Needs a sport where a match can end level, and Draw points other than
+        0/0 - the admin sets both to 0 for a match that cannot be drawn.
+        """
+        if self.sport.name not in DRAW_SPORTS:
+            return False
+        return bool(self.draw_win_points or self.draw_lose_points)
 
     @property
     def has_result(self):
@@ -236,9 +242,15 @@ class Match(models.Model):
             if self.winner_id:
                 errors["is_draw"] = "A draw cannot also have a winner. Clear the winner."
             elif self.sport_id and not self.allows_draw:
-                errors["is_draw"] = (
-                    f"{self.sport.name} matches cannot end in a draw."
-                )
+                if self.sport.name in DRAW_SPORTS:
+                    errors["is_draw"] = (
+                        "This match has Draw points of 0 and 0, so it cannot "
+                        "end in a draw."
+                    )
+                else:
+                    errors["is_draw"] = (
+                        f"{self.sport.name} matches cannot end in a draw."
+                    )
 
         if (
             self.prediction_deadline
