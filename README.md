@@ -29,3 +29,7 @@ Set `DATABASE_URL` (PostgreSQL) and the other variables listed in
 `.env.example`. Deploy-time steps: install `requirements.txt`, run
 `python manage.py collectstatic --noinput`, run `python manage.py migrate`,
 then start `gunicorn config.wsgi:application`.
+
+Password-reset emails are sent through Resend. Set `RESEND_API_KEY` and
+`DEFAULT_FROM_EMAIL` (a sender on a domain verified in Resend) in production;
+without a key, emails are printed to the console.

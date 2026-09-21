@@ -35,6 +35,16 @@ TINY_PNG = base64.b64decode(
 )
 
 
+def make_user(username, **kwargs):
+    """create_user with a default email.
+
+    Email is mandatory: EmailRequiredMiddleware bounces logged-in users who
+    have none to the add-email page. Pass email="" to make one without.
+    """
+    kwargs.setdefault("email", f"{username}@example.com")
+    return User.objects.create_user(username, **kwargs)
+
+
 def make_flag(name="flag.png"):
     return SimpleUploadedFile(name, TINY_PNG, content_type="image/png")
 
@@ -86,15 +96,15 @@ def future_match(**kwargs):
 
 class ProfileSignalTests(TestCase):
     def test_profile_created_with_user(self):
-        user = User.objects.create_user("alice", password="pass12345")
+        user = make_user("alice", password="pass12345")
         self.assertTrue(Profile.objects.filter(user=user).exists())
         self.assertEqual(user.profile.points, 0)
 
 
 class ScoringTests(TestCase):
     def setUp(self):
-        self.alice = User.objects.create_user("alice", password="pass12345")
-        self.bob = User.objects.create_user("bob", password="pass12345")
+        self.alice = make_user("alice", password="pass12345")
+        self.bob = make_user("bob", password="pass12345")
         self.match = future_match()
         # alice picks Team A, bob picks Team B.
         Prediction.objects.create(user=self.alice, match=self.match, choice="A")
@@ -140,7 +150,7 @@ class ScoringTests(TestCase):
         self.assertEqual(self._points(self.alice), 0)
 
     def test_user_without_a_prediction_is_not_affected(self):
-        carol = User.objects.create_user("carol", password="pass12345")
+        carol = make_user("carol", password="pass12345")
         self._set_winner("A")
         score_match(self.match.pk)
         self.assertEqual(self._points(carol), 0)
@@ -334,11 +344,11 @@ class MatchAdminScoringTests(TestCase):
     def setUp(self):
         self.factory = RequestFactory()
         self.match_admin = MatchAdmin(Match, AdminSite())
-        self.staff = User.objects.create_user(
+        self.staff = make_user(
             "staff", password="pass12345", is_staff=True, is_superuser=True
         )
-        self.alice = User.objects.create_user("alice", password="pass12345")
-        self.bob = User.objects.create_user("bob", password="pass12345")
+        self.alice = make_user("alice", password="pass12345")
+        self.bob = make_user("bob", password="pass12345")
         self.match = future_match()
         Prediction.objects.create(user=self.alice, match=self.match, choice="A")
         Prediction.objects.create(user=self.bob, match=self.match, choice="B")
@@ -410,7 +420,7 @@ class MatchAdminScoringTests(TestCase):
 
 class UniquePredictionTests(TestCase):
     def test_one_prediction_per_user_match(self):
-        user = User.objects.create_user("alice", password="pass12345")
+        user = make_user("alice", password="pass12345")
         match = future_match()
         Prediction.objects.create(user=user, match=match, choice="A")
         with self.assertRaises(IntegrityError):
@@ -419,7 +429,7 @@ class UniquePredictionTests(TestCase):
 
 class PredictViewTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user("alice", password="pass12345")
+        self.user = make_user("alice", password="pass12345")
         self.client.login(username="alice", password="pass12345")
 
     def test_can_predict_before_deadline(self):
@@ -484,6 +494,7 @@ def registration_data(**overrides):
         "age": "30",
     }
     data.update(overrides)
+    data.setdefault("email", f"{data['username']}@example.com")
     return data
 
 
@@ -501,7 +512,7 @@ class AccountTests(TestCase):
         self.assertNotContains(home, 'href="/accounts/login/"')
 
     def test_register_rejects_duplicate_username(self):
-        User.objects.create_user("taken", password="StrongPass123")
+        make_user("taken", password="StrongPass123")
         response = self.client.post(
             reverse("register"), registration_data(username="taken")
         )
@@ -509,7 +520,7 @@ class AccountTests(TestCase):
         self.assertEqual(User.objects.filter(username="taken").count(), 1)
 
     def test_login_and_logout(self):
-        User.objects.create_user("alice", password="StrongPass123")
+        make_user("alice", password="StrongPass123")
         guest = self.client.get(reverse("match_list"))
         self.assertContains(guest, "Log in")
         self.assertContains(guest, "Register")
@@ -547,13 +558,13 @@ class AccountTests(TestCase):
         self.assertNotContains(response, "Log out")
 
     def test_logged_in_user_is_redirected_away_from_register(self):
-        User.objects.create_user("alice", password="StrongPass123")
+        make_user("alice", password="StrongPass123")
         self.client.login(username="alice", password="StrongPass123")
         response = self.client.get(reverse("register"))
         self.assertRedirects(response, reverse("match_list"))
 
     def test_logout_get_is_not_allowed(self):
-        User.objects.create_user("alice", password="StrongPass123")
+        make_user("alice", password="StrongPass123")
         self.client.login(username="alice", password="StrongPass123")
         response = self.client.get(reverse("logout"))
         self.assertEqual(response.status_code, 405)
@@ -646,7 +657,7 @@ class PasswordResetFlowTests(TestCase):
     NEW_PASSWORD = "StrongNewPass123"
 
     def setUp(self):
-        self.user = User.objects.create_user(
+        self.user = make_user(
             "resetuser", email="reset@example.com", password="oldpass12345"
         )
 
@@ -727,6 +738,19 @@ class PasswordResetFlowTests(TestCase):
         self.assertContains(response, "invalid")
         self.assertContains(response, reverse("password_reset"))
 
+    def test_reset_email_names_account_and_uses_project_subject(self):
+        self._request_reset()
+        message = mail.outbox[0]
+        self.assertEqual(message.subject, "Reset your Sports Predictions password")
+        self.assertIn("resetuser", message.body)
+        self.assertIn("Sports Predictions", message.body)
+
+    def test_reset_email_matches_case_insensitively_and_only_one_account(self):
+        make_user("bystander", email="bystander@example.com")
+        self._request_reset(email="RESET@example.com")
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertEqual(mail.outbox[0].to, ["reset@example.com"])
+
     def test_unknown_email_does_not_reveal_account_and_sends_nothing(self):
         response = self._request_reset(email="nobody@example.com")
         self.assertRedirects(response, reverse("password_reset_done"))
@@ -738,7 +762,7 @@ class PasswordChangeFlowTests(TestCase):
     NEW_PASSWORD = "StrongNewPass123"
 
     def setUp(self):
-        self.user = User.objects.create_user(
+        self.user = make_user(
             "changeuser", password=self.OLD_PASSWORD
         )
 
@@ -1012,7 +1036,7 @@ class TeamFlagRenderingTests(MediaIsolatedTestCase):
         self.assertNotIn("Tigers flag", content)
 
     def test_my_predictions_shows_flag_and_no_broken_image_for_flagless_team(self):
-        user = User.objects.create_user("alice", password="pass12345")
+        user = make_user("alice", password="pass12345")
         Prediction.objects.create(user=user, match=self.match, choice="A")
         self.client.login(username="alice", password="pass12345")
 
@@ -1068,8 +1092,8 @@ class TeamAdminFlagTests(MediaIsolatedTestCase):
 
 class MyPredictionsViewTests(TestCase):
     def setUp(self):
-        self.alice = User.objects.create_user("alice", password="pass12345")
-        self.bob = User.objects.create_user("bob", password="pass12345")
+        self.alice = make_user("alice", password="pass12345")
+        self.bob = make_user("bob", password="pass12345")
         self.url = reverse("my_predictions")
 
     def _match(self, label):
@@ -1216,7 +1240,7 @@ class MyPredictionsViewTests(TestCase):
 
 class MatchDetailViewTests(TestCase):
     def setUp(self):
-        self.user = User.objects.create_user("alice", password="pass12345")
+        self.user = make_user("alice", password="pass12345")
 
     def _match(self, label, **kwargs):
         sport = Sport.objects.create(name=f"Sport {label}")
@@ -1346,7 +1370,7 @@ class LeaderboardViewTests(TestCase):
     """Hardening for templates/predictions/leaderboard.html + the leaderboard view."""
 
     def _user(self, username, points=0):
-        user = User.objects.create_user(username, password="pass12345")
+        user = make_user(username, password="pass12345")
         # A Profile is auto-created by the post_save signal; set its points.
         Profile.objects.filter(user=user).update(points=points)
         return user
@@ -1419,8 +1443,8 @@ class LeaderboardViewTests(TestCase):
         self.assertNotContains(response, "table-warning")
 
     def test_leaderboard_reflects_scored_predictions(self):
-        correct_user = User.objects.create_user("winner", password="pass12345")
-        wrong_user = User.objects.create_user("loser", password="pass12345")
+        correct_user = make_user("winner", password="pass12345")
+        wrong_user = make_user("loser", password="pass12345")
         match = future_match()
         Prediction.objects.create(user=correct_user, match=match, choice="A")
         Prediction.objects.create(user=wrong_user, match=match, choice="B")
@@ -1475,7 +1499,7 @@ class MonthlyLeaderboardTests(TestCase):
     never Profile.points directly -- so re-scoring can't double-count."""
 
     def _user(self, username):
-        return User.objects.create_user(username, password="pass12345")
+        return make_user(username, password="pass12345")
 
     def _points(self, user):
         user.profile.refresh_from_db()
@@ -1618,7 +1642,7 @@ class LeaderboardMedalTests(TestCase):
 
     def test_medal_appears_after_the_points_in_the_row(self):
         for index in range(3):
-            user = User.objects.create_user(f"player{index}", password="pass12345")
+            user = make_user(f"player{index}", password="pass12345")
             Profile.objects.filter(user=user).update(points=100 - index * 10)
 
         content = self.client.get(reverse("leaderboard")).content.decode()
@@ -1633,7 +1657,7 @@ class LeaderboardMedalTests(TestCase):
 
     def test_all_time_leaderboard_shows_medals_only_for_top_three(self):
         for index in range(4):
-            user = User.objects.create_user(f"player{index}", password="pass12345")
+            user = make_user(f"player{index}", password="pass12345")
             Profile.objects.filter(user=user).update(points=100 - index * 10)
 
         response = self.client.get(reverse("leaderboard"))
@@ -1658,7 +1682,7 @@ class LeaderboardMedalTests(TestCase):
 
     def test_monthly_leaderboard_shows_medals_only_for_top_three(self):
         users = [
-            User.objects.create_user(f"m{index}", password="pass12345")
+            make_user(f"m{index}", password="pass12345")
             for index in range(4)
         ]
         match = future_match()
@@ -1677,7 +1701,7 @@ class LeaderboardMedalTests(TestCase):
         self._assert_no_medal(row("m3"))
 
     def test_fewer_than_three_players_shows_no_missing_medal_errors(self):
-        user = User.objects.create_user("solo", password="pass12345")
+        user = make_user("solo", password="pass12345")
         Profile.objects.filter(user=user).update(points=5)
 
         response = self.client.get(reverse("leaderboard"))
@@ -1776,7 +1800,7 @@ class SportMatchesViewTests(TestCase):
 
     def test_authenticated_user_sees_their_selected_team_highlighted(self):
         match = sport_match("Football", "FA pick", "FB pick")
-        user = User.objects.create_user("alice", password="pass12345")
+        user = make_user("alice", password="pass12345")
         Prediction.objects.create(user=user, match=match, choice="A")
         self.client.login(username="alice", password="pass12345")
 
@@ -1812,7 +1836,7 @@ class SportMatchesViewTests(TestCase):
 
     def test_authenticated_user_can_predict_directly_from_a_sport_page(self):
         match = sport_match("Badminton", "BA inline", "BB inline")
-        user = User.objects.create_user("alice", password="pass12345")
+        user = make_user("alice", password="pass12345")
         self.client.login(username="alice", password="pass12345")
 
         page = self.client.get(reverse("sport_matches", args=["badminton"]))
@@ -2344,7 +2368,7 @@ class VisitorTimezoneTests(TestCase):
                 for p in response.context["monthly_profiles"]
             ]
 
-        User.objects.create_user("alice", password="pass12345")
+        make_user("alice", password="pass12345")
         self.assertEqual(totals("Pacific/Kiritimati"), totals("Pacific/Pago_Pago"))
 
 
@@ -2352,9 +2376,9 @@ class DrawTests(TestCase):
     """Draw as a third pick for Football/Cricket/Hockey, with admin-set points."""
 
     def setUp(self):
-        self.alice = User.objects.create_user("alice", password="pass12345")
-        self.bob = User.objects.create_user("bob", password="pass12345")
-        self.carol = User.objects.create_user("carol", password="pass12345")
+        self.alice = make_user("alice", password="pass12345")
+        self.bob = make_user("bob", password="pass12345")
+        self.carol = make_user("carol", password="pass12345")
 
     def _predict(self, user, match, choice):
         self.client.force_login(user)
@@ -2491,7 +2515,7 @@ class NoDrawMatchTests(TestCase):
     """Draw points of 0 and 0 mean the match cannot be drawn: hide the Draw box."""
 
     def setUp(self):
-        self.alice = User.objects.create_user("alice", password="pass12345")
+        self.alice = make_user("alice", password="pass12345")
         self.client.force_login(self.alice)
 
     def test_zero_zero_draw_points_hide_draw_box(self):
@@ -2766,19 +2790,32 @@ class DatabaseFlagStorageTests(TestCase):
 
 
 class RegistrationEmailAgeTests(TestCase):
-    """Optional Email, required Age (18-99) and required-field stars."""
+    """Required Email, required Age (18-99) and required-field stars."""
 
     def _register(self, **overrides):
         return self.client.post(reverse("register"), registration_data(**overrides))
 
-    def test_email_is_optional(self):
-        response = self._register()
-        self.assertRedirects(response, reverse("match_list"))
-        self.assertEqual(User.objects.get(username="newuser").email, "")
+    def test_email_is_required(self):
+        for missing in ("", "   "):
+            with self.subTest(email=missing):
+                response = self._register(email=missing)
+                self.assertEqual(response.status_code, 200)
+                self.assertFalse(User.objects.filter(username="newuser").exists())
 
     def test_email_is_saved_when_given(self):
         self._register(email="fan@example.com")
         self.assertEqual(User.objects.get(username="newuser").email, "fan@example.com")
+
+    def test_email_is_saved_lower_cased(self):
+        self._register(email="Fan@Example.COM")
+        self.assertEqual(User.objects.get(username="newuser").email, "fan@example.com")
+
+    def test_duplicate_email_is_rejected_case_insensitively(self):
+        make_user("first", email="fan@example.com")
+        response = self._register(email="FAN@example.com")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "An account with this email already exists.")
+        self.assertFalse(User.objects.filter(username="newuser").exists())
 
     def test_invalid_email_is_rejected(self):
         response = self._register(email="not-an-email")
@@ -2817,19 +2854,105 @@ class RegistrationEmailAgeTests(TestCase):
         self.assertNotIn('<option value="100">', content)
         self.assertContains(
             response,
-            "Optional, but you must provide an email address to be eligible to win prizes.",
+            "Required. Used to reset your password and to contact prize winners.",
         )
 
-    def test_required_fields_are_starred_and_email_is_not(self):
+    def test_all_fields_are_starred_as_required(self):
         content = self.client.get(reverse("register")).content.decode()
-        for field in ("username", "password1", "password2", "country", "state", "age"):
+        for field in (
+            "username", "email", "password1", "password2", "country", "state", "age"
+        ):
             with self.subTest(field=field):
                 label = re.search(
                     rf'<label[^>]*for="id_{field}"[^>]*>(.*?)</label>', content, re.S
                 )
                 self.assertIn("*", label.group(1))
-        email_label = re.search(r'<label[^>]*for="id_email"[^>]*>(.*?)</label>', content, re.S)
-        self.assertNotIn("*", email_label.group(1))
+
+
+class EmailRequiredTests(TestCase):
+    """Users without an email are sent to the add-email page."""
+
+    def setUp(self):
+        self.user = make_user("old", email="", password="StrongPass123")
+        self.client.login(username="old", password="StrongPass123")
+        self.add_email_url = reverse("add_email")
+
+    def test_user_without_email_is_redirected_and_returns_to_target(self):
+        response = self.client.get(reverse("leaderboard"))
+        self.assertRedirects(
+            response,
+            f"{self.add_email_url}?next={reverse('leaderboard')}",
+        )
+
+    def test_post_is_redirected_without_next(self):
+        response = self.client.post(reverse("predict", args=[1]))
+        self.assertRedirects(response, self.add_email_url)
+
+    def test_exempt_pages_do_not_redirect(self):
+        self.assertEqual(self.client.get(self.add_email_url).status_code, 200)
+        self.assertRedirects(self.client.post(reverse("logout")), reverse("match_list"))
+
+    def test_admin_is_exempt(self):
+        # A non-staff user hitting the admin is bounced to the admin login,
+        # never to the add-email page.
+        response = self.client.get(reverse("admin:index"))
+        self.assertEqual(response.status_code, 302)
+        self.assertNotIn(self.add_email_url, response.url)
+
+    def test_user_with_email_is_not_redirected(self):
+        self.client.logout()
+        make_user("fine", password="StrongPass123")
+        self.client.login(username="fine", password="StrongPass123")
+        self.assertEqual(self.client.get(reverse("leaderboard")).status_code, 200)
+
+    def test_guest_is_not_redirected(self):
+        self.client.logout()
+        self.assertEqual(self.client.get(reverse("leaderboard")).status_code, 200)
+
+    def test_saving_email_lets_user_through_to_next(self):
+        response = self.client.post(
+            self.add_email_url,
+            {"email": "Old@Example.com", "next": reverse("leaderboard")},
+        )
+        self.assertRedirects(response, reverse("leaderboard"))
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "old@example.com")
+        self.assertEqual(self.client.get(reverse("leaderboard")).status_code, 200)
+
+    def test_email_used_by_another_account_is_rejected(self):
+        make_user("other", email="taken@example.com")
+        response = self.client.post(self.add_email_url, {"email": "TAKEN@example.com"})
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "An account with this email already exists.")
+        self.user.refresh_from_db()
+        self.assertEqual(self.user.email, "")
+
+    def test_blank_or_invalid_email_is_rejected(self):
+        for bad in ("", "not-an-email"):
+            with self.subTest(email=bad):
+                response = self.client.post(self.add_email_url, {"email": bad})
+                self.assertEqual(response.status_code, 200)
+                self.user.refresh_from_db()
+                self.assertEqual(self.user.email, "")
+
+    def test_offsite_next_is_ignored(self):
+        response = self.client.post(
+            self.add_email_url,
+            {"email": "old@example.com", "next": "https://evil.example/"},
+        )
+        self.assertRedirects(response, reverse("match_list"))
+
+    def test_user_who_already_has_email_is_bounced_off_the_page(self):
+        self.user.email = "old@example.com"
+        self.user.save()
+        self.assertRedirects(self.client.get(self.add_email_url), reverse("match_list"))
+
+    def test_add_email_requires_login(self):
+        self.client.logout()
+        response = self.client.get(self.add_email_url)
+        self.assertRedirects(
+            response, f"{reverse('login')}?next={self.add_email_url}"
+        )
 
 
 class MatchAdminTeamsBySportTests(TestCase):
@@ -3013,7 +3136,7 @@ class IndiaTimeZoneTests(TestCase):
     def test_monthly_leaderboard_month_starts_at_midnight_ist(self):
         from datetime import datetime, timezone as dt_timezone
 
-        user = User.objects.create_user("indian", password="pass12345")
+        user = make_user("indian", password="pass12345")
         match = future_match()
         # IST midnight on 1 Sept 2026 is 18:30 UTC on 31 Aug.
         before = ScoreAdjustment.objects.create(user=user, match=match, delta=7)
@@ -3175,7 +3298,7 @@ class MatchTitleAndPointsMarkupTests(TestCase):
             draw_win_points=7,
             draw_lose_points=-2,
         )
-        User.objects.create_user("alice", password="pass12345")
+        make_user("alice", password="pass12345")
         for logged_in in (False, True):
             with self.subTest(logged_in=logged_in):
                 if logged_in:

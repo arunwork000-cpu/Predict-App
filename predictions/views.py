@@ -7,9 +7,10 @@ from django.db.models import Sum
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
+from django.utils.http import url_has_allowed_host_and_scheme
 
 from .constants import DEFAULT_SPORT_SLUG, DRAW_SPORTS, SPORT_SLUGS, SUPPORTED_SPORTS
-from .forms import PredictionForm, RegistrationForm
+from .forms import AddEmailForm, PredictionForm, RegistrationForm
 from .locations import STATES_BY_COUNTRY
 from .models import Match, Prediction, Profile, ScoreAdjustment, StoredFile
 from .services import sync_match_statuses
@@ -244,7 +245,7 @@ def leaderboard(request):
 
 
 def register(request):
-    """Sign up with a custom form (optional Email; required Country/State/Age), then log in."""
+    """Sign up with a custom form (required Email, Country, State and Age), then log in."""
     if request.user.is_authenticated:
         return redirect("match_list")
     if request.method == "POST":
@@ -267,6 +268,36 @@ def register(request):
         request,
         "predictions/register.html",
         {"form": form, "states_by_country_json": json.dumps(STATES_BY_COUNTRY)},
+    )
+
+
+@login_required
+def add_email(request):
+    """One-time page asking a logged-in user with no email for one.
+
+    EmailRequiredMiddleware sends such users here; once an email is saved
+    they are sent on to the page they were trying to reach.
+    """
+    next_url = request.GET.get("next") or request.POST.get("next") or ""
+    if not url_has_allowed_host_and_scheme(
+        next_url,
+        allowed_hosts={request.get_host()},
+        require_https=request.is_secure(),
+    ):
+        next_url = ""
+    if request.user.email:
+        return redirect(next_url or "match_list")
+    if request.method == "POST":
+        form = AddEmailForm(request.POST, user=request.user)
+        if form.is_valid():
+            request.user.email = form.cleaned_data["email"]
+            request.user.save(update_fields=["email"])
+            messages.success(request, "Thanks, your email has been saved.")
+            return redirect(next_url or "match_list")
+    else:
+        form = AddEmailForm(user=request.user)
+    return render(
+        request, "registration/add_email.html", {"form": form, "next": next_url}
     )
 
 

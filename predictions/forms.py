@@ -11,7 +11,7 @@ MAX_AGE = 99
 
 
 class RegistrationForm(UserCreationForm):
-    """UserCreationForm plus optional Email and required Country/State/Age.
+    """UserCreationForm plus required Email, Country, State and Age.
 
     Both fields are ChoiceFields (rendered as <select>), so a submission can
     only carry one of the values we listed -- never free text. The state
@@ -21,11 +21,10 @@ class RegistrationForm(UserCreationForm):
     """
 
     email = forms.EmailField(
-        required=False,
         label="Email",
         help_text=(
-            "Optional, but you must provide an email address to be eligible "
-            "to win prizes."
+            "Required. Used to reset your password and to contact prize "
+            "winners."
         ),
     )
     country = forms.ChoiceField(
@@ -58,6 +57,9 @@ class RegistrationForm(UserCreationForm):
         model = User
         fields = ("username", "email")
 
+    def clean_email(self):
+        return unique_email(self.cleaned_data["email"])
+
     def clean(self):
         cleaned_data = super().clean()
         country = cleaned_data.get("country")
@@ -67,6 +69,38 @@ class RegistrationForm(UserCreationForm):
                 "state", "Select a state that belongs to the chosen country."
             )
         return cleaned_data
+
+
+def unique_email(email, exclude_user=None):
+    """Return `email` lower-cased, or raise ValidationError if another
+    account already uses it (compared case-insensitively).
+
+    auth_user.email has no DB unique constraint, so this is what keeps a
+    password-reset email pointing at exactly one account.
+    """
+    email = email.strip().lower()
+    taken = User.objects.filter(email__iexact=email)
+    if exclude_user is not None:
+        taken = taken.exclude(pk=exclude_user.pk)
+    if taken.exists():
+        raise forms.ValidationError("An account with this email already exists.")
+    return email
+
+
+class AddEmailForm(forms.Form):
+    """Asks a logged-in user with no email on file for one."""
+
+    email = forms.EmailField(
+        label="Email",
+        help_text="Used to reset your password and to contact prize winners.",
+    )
+
+    def __init__(self, *args, user, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.user = user
+
+    def clean_email(self):
+        return unique_email(self.cleaned_data["email"], exclude_user=self.user)
 
 
 class PredictionForm(forms.Form):

@@ -20,4 +20,5 @@ urlpatterns = [
     ),
     # Django has no built-in register view; login/logout are in config/urls.py.
     path("accounts/register/", views.register, name="register"),
+    path("accounts/add-email/", views.add_email, name="add_email"),
 ]

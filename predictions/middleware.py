@@ -1,7 +1,44 @@
 import zoneinfo
+from urllib.parse import urlencode
 
+from django.conf import settings
+from django.shortcuts import redirect
 from django.urls import reverse
 from django.utils import timezone
+
+
+class EmailRequiredMiddleware:
+    """Send logged-in users who have no email on file to the "add email" page.
+
+    Email used to be optional at signup, so older accounts have none, which
+    means they could never get a password-reset link. Until they add one they
+    can only reach the add-email page, log out, the admin, and static/media
+    files.
+    """
+
+    def __init__(self, get_response):
+        self.get_response = get_response
+
+    def __call__(self, request):
+        user = request.user
+        if user.is_authenticated and not user.email and not self._exempt(request):
+            url = reverse("add_email")
+            if request.method == "GET":
+                url += "?" + urlencode({"next": request.get_full_path()})
+            return redirect(url)
+        return self.get_response(request)
+
+    @staticmethod
+    def _exempt(request):
+        path = request.path_info
+        if path in (reverse("add_email"), reverse("logout")):
+            return True
+        prefixes = (
+            reverse("admin:index"),
+            settings.STATIC_URL,
+            settings.MEDIA_URL,
+        )
+        return path.startswith(prefixes)
 
 
 class TimezoneMiddleware:

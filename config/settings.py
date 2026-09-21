@@ -78,6 +78,7 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'anymail',
     'predictions.apps.PredictionsConfig',
 ]
 
@@ -92,6 +93,8 @@ MIDDLEWARE = [
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    # Sends logged-in users who have no email on file to the "add email" page.
+    'predictions.middleware.EmailRequiredMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
@@ -224,8 +227,21 @@ MESSAGE_TAGS = {
 # Email
 # https://docs.djangoproject.com/en/6.1/topics/email/#topic-email-configuration
 
-# Development: print emails (e.g. password reset) to the console.
-EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+# With RESEND_API_KEY set (production), emails such as password-reset links
+# are sent through Resend's HTTPS API. Without it (local dev, tests) they are
+# printed to the console instead.
+RESEND_API_KEY = env('RESEND_API_KEY', default='')
+if RESEND_API_KEY:
+    EMAIL_BACKEND = 'anymail.backends.resend.EmailBackend'
+    ANYMAIL = {'RESEND_API_KEY': RESEND_API_KEY}
+else:
+    EMAIL_BACKEND = 'django.core.mail.backends.console.EmailBackend'
+
+# The "From" address on outgoing email. Must belong to a domain verified in
+# Resend when RESEND_API_KEY is set.
+DEFAULT_FROM_EMAIL = env(
+    'DEFAULT_FROM_EMAIL', default='Sports Predictions <noreply@localhost>'
+)
 
 
 # Logging
