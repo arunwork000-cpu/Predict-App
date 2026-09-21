@@ -2054,6 +2054,39 @@ class PublicNavTests(TestCase):
         tennis_link = tennis_link[: tennis_link.index("</a>")]
         self.assertNotIn("Predict now", tennis_link)
 
+    def _sport_link(self, response, sport):
+        content = response.content.decode()
+        link = content[content.index(f'href="/sport/{sport}/"'):]
+        return link[: link.index("</a>")]
+
+    def test_predict_now_badge_hidden_once_user_predicted_every_open_match(self):
+        user = make_user("pn_user")
+        first = sport_match("Football", "PN P1A", "PN P1B")
+        second = sport_match("Football", "PN P2A", "PN P2B")
+        self.client.force_login(user)
+
+        response = self.client.get(reverse("match_list"))
+        self.assertIn("Predict now", self._sport_link(response, "football"))
+
+        Prediction.objects.create(user=user, match=first, choice=Prediction.Side.A)
+        response = self.client.get(reverse("match_list"))
+        self.assertIn("Predict now", self._sport_link(response, "football"))
+
+        Prediction.objects.create(user=user, match=second, choice=Prediction.Side.B)
+        response = self.client.get(reverse("match_list"))
+        self.assertNotIn("Predict now", self._sport_link(response, "football"))
+
+    def test_predict_now_badge_ignores_other_users_predictions(self):
+        other = make_user("pn_other")
+        me = make_user("pn_me")
+        match = sport_match("Football", "PN O1A", "PN O1B")
+        Prediction.objects.create(user=other, match=match, choice=Prediction.Side.A)
+        self.client.force_login(me)
+
+        response = self.client.get(reverse("match_list"))
+
+        self.assertIn("Predict now", self._sport_link(response, "football"))
+
 
 class DefaultSportsDataMigrationTests(TestCase):
     def test_all_supported_sports_exist(self):
