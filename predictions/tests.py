@@ -1616,6 +1616,127 @@ class MonthlyLeaderboardTests(TestCase):
         self.assertIn("India", row)
 
 
+class PastMonthLeaderboardTests(TestCase):
+    """?month=YYYY-MM on the Monthly board: past months show only the top 3."""
+
+    @staticmethod
+    def _start_of_this_month():
+        return timezone.now().astimezone(timezone.get_default_timezone()).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+
+    def _last_month(self):
+        """(a moment mid last month, its 'YYYY-MM' value)."""
+        moment = self._start_of_this_month() - timedelta(days=5)
+        return moment, f"{moment.year:04d}-{moment.month:02d}"
+
+    def _award(self, username, delta, when=None):
+        user = User.objects.filter(username=username).first() or make_user(
+            username, password="pass12345"
+        )
+        adjustment = ScoreAdjustment.objects.create(
+            user=user, match=future_match(), delta=delta
+        )
+        if when is not None:
+            # auto_now_add ignores create(); backdate the ledger row directly.
+            ScoreAdjustment.objects.filter(pk=adjustment.pk).update(created_at=when)
+        return user
+
+    def _monthly_names(self, month=None):
+        url = reverse("leaderboard") + (f"?month={month}" if month else "")
+        response = self.client.get(url)
+        return [p.user.username for p in response.context["monthly_profiles"]], response
+
+    def test_past_month_shows_only_top_three_with_medals(self):
+        when, month = self._last_month()
+        for name, delta in zip(("p0", "p1", "p2", "p3", "p4"), (50, 40, 30, 20, 10)):
+            self._award(name, delta, when)
+
+        names, response = self._monthly_names(month)
+        content = response.content.decode()
+
+        self.assertEqual(names, ["p0", "p1", "p2"])
+        row = LeaderboardMedalTests._row_for
+        self.assertIn("gold.svg", row(content, "p0", "monthly"))
+        self.assertIn("silver.svg", row(content, "p1", "monthly"))
+        self.assertIn("bronze.svg", row(content, "p2", "monthly"))
+        self.assertNotIn("<td>p3</td>", content[content.index('id="leaderboard-monthly"'):])
+
+    def test_past_month_excludes_zero_point_players(self):
+        when, month = self._last_month()
+        self._award("winner", 10, when)
+        make_user("idle", password="pass12345")
+
+        names, _ = self._monthly_names(month)
+
+        self.assertEqual(names, ["winner"])
+
+    def test_past_month_only_counts_that_months_points(self):
+        when, month = self._last_month()
+        self._award("alice", 30, when)
+        self._award("alice", 100)  # this month
+
+        names, response = self._monthly_names(month)
+        self.assertEqual(names, ["alice"])
+        self.assertEqual(response.context["monthly_profiles"][0].monthly_points, 30)
+
+        current_names, current = self._monthly_names()
+        self.assertEqual(current.context["monthly_profiles"][0].monthly_points, 100)
+
+    def test_current_month_still_lists_everyone(self):
+        for index in range(5):
+            self._award(f"c{index}", 10 + index)
+        make_user("idle", password="pass12345")
+
+        names, response = self._monthly_names()
+
+        self.assertEqual(len(names), 6)
+        self.assertFalse(response.context["is_past_month"])
+
+    def test_past_month_with_no_winners_shows_message(self):
+        _, month = self._last_month()
+
+        names, response = self._monthly_names(month)
+
+        self.assertEqual(names, [])
+        self.assertContains(response, "No winners recorded for this month.")
+
+    def test_invalid_or_future_month_falls_back_to_current(self):
+        self._award("alice", 10)
+        current = self._start_of_this_month()
+        future = f"{current.year + 1:04d}-{current.month:02d}"
+
+        for bad in ("garbage", "2026-13", "2026", "", future):
+            names, response = self._monthly_names(bad)
+            self.assertEqual(names, ["alice"], bad)
+            self.assertFalse(response.context["is_past_month"], bad)
+
+    def test_month_options_list_active_months_plus_current(self):
+        when, month = self._last_month()
+        self._award("alice", 10, when)
+        current = self._start_of_this_month()
+
+        _, response = self._monthly_names()
+        values = [o["value"] for o in response.context["month_options"]]
+
+        self.assertEqual(values, [f"{current.year:04d}-{current.month:02d}", month])
+        self.assertEqual(
+            response.context["selected_month"], f"{current.year:04d}-{current.month:02d}"
+        )
+
+    def test_month_boundary_uses_site_time_zone(self):
+        start = self._start_of_this_month()
+        _, last_month = self._last_month()
+        self._award("first_second", 10, start)  # 00:00:00 on the 1st -> this month
+        self._award("last_second", 20, start - timedelta(seconds=1))  # -> last month
+
+        this_names, _ = self._monthly_names()
+        last_names, _ = self._monthly_names(last_month)
+
+        self.assertEqual(this_names[0], "first_second")
+        self.assertEqual(last_names, ["last_second"])
+
+
 class LeaderboardMedalTests(TestCase):
     """Gold/silver/bronze medal images next to the top three rows only."""
 

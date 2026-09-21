@@ -1,9 +1,11 @@
+import datetime
 import json
 
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
 from django.db.models import Sum
+from django.db.models.functions import TruncMonth
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -205,21 +207,42 @@ def _all_time_profiles():
     )
 
 
-def _monthly_profiles():
-    """Points earned during the current calendar month.
+def _current_month():
+    """(year, month) of now, in the fixed site zone (not the visitor's) so
+    every user sees the same board."""
+    now = timezone.now().astimezone(timezone.get_default_timezone())
+    return now.year, now.month
 
-    Uses the sum of this month's ScoreAdjustment rows rather than
+
+def _parse_month(value):
+    """Parse a `YYYY-MM` query value; None if missing or malformed."""
+    try:
+        year_str, month_str = (value or "").split("-")
+        year, month = int(year_str), int(month_str)
+        datetime.date(year, month, 1)
+    except (ValueError, TypeError):
+        return None
+    return year, month
+
+
+def _monthly_profiles(year, month):
+    """Points earned during the given calendar month.
+
+    Uses the sum of that month's ScoreAdjustment rows rather than
     Profile.points, so a winner correction made this month for a match
     scored last month only contributes its net adjustment -- never the full
     original award again -- and re-running scoring with no change (delta 0)
     contributes nothing, matching score_match()'s existing idempotency.
     """
-    # Fixed site zone (not the visitor's) so every user sees the same board.
-    start_of_month = timezone.now().astimezone(timezone.get_default_timezone()).replace(
-        day=1, hour=0, minute=0, second=0, microsecond=0
+    zone = timezone.get_default_timezone()
+    start = datetime.datetime(year, month, 1, tzinfo=zone)
+    end = (
+        datetime.datetime(year + 1, 1, 1, tzinfo=zone)
+        if month == 12
+        else datetime.datetime(year, month + 1, 1, tzinfo=zone)
     )
     rows = (
-        ScoreAdjustment.objects.filter(created_at__gte=start_of_month)
+        ScoreAdjustment.objects.filter(created_at__gte=start, created_at__lt=end)
         .values("user_id")
         .annotate(total=Sum("delta"))
     )
@@ -233,13 +256,50 @@ def _monthly_profiles():
 
 
 def leaderboard(request):
-    """One page showing the All-Time and Monthly boards side by side."""
+    """One page showing the All-Time and Monthly boards side by side.
+
+    The Monthly board defaults to the current month (full ranking). `?month=
+    YYYY-MM` picks an earlier month, which shows only its top 3.
+    """
+    current = _current_month()
+    selected = _parse_month(request.GET.get("month"))
+    if selected is None or selected > current:
+        selected = current
+    is_past_month = selected != current
+
+    monthly_profiles = _monthly_profiles(*selected)
+    if is_past_month:
+        # Only the winners: a zero-point player isn't one.
+        monthly_profiles = [p for p in monthly_profiles if p.monthly_points > 0][:3]
+
+    zone = timezone.get_default_timezone()
+    months_with_activity = {
+        (m.year, m.month)
+        for m in ScoreAdjustment.objects.annotate(
+            month=TruncMonth("created_at", tzinfo=zone)
+        )
+        .values_list("month", flat=True)
+        .distinct()
+    }
+    months_with_activity.add(current)
+    month_options = [
+        {
+            "value": f"{year:04d}-{month:02d}",
+            "label": datetime.date(year, month, 1).strftime("%B %Y"),
+        }
+        for year, month in sorted(months_with_activity, reverse=True)
+        if (year, month) <= current
+    ]
+
     return render(
         request,
         "predictions/leaderboard.html",
         {
             "all_time_profiles": _all_time_profiles(),
-            "monthly_profiles": _monthly_profiles(),
+            "monthly_profiles": monthly_profiles,
+            "is_past_month": is_past_month,
+            "selected_month": f"{selected[0]:04d}-{selected[1]:02d}",
+            "month_options": month_options,
         },
     )
 

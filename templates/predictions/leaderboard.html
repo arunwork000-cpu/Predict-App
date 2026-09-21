@@ -1,15 +1,31 @@
 {% extends "base.html" %}
 {% block title %}Leaderboard{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">Leaderboard</h1>
 <div class="row g-4">
   <section class="col-12 col-lg-6" id="leaderboard-all-time" aria-labelledby="lb-all-time-heading">
+    <h1 class="h3 mb-3">Leaderboard</h1>
     <h2 class="h5 mb-2" id="lb-all-time-heading">All-Time</h2>
     {% include "predictions/_leaderboard_table.html" with profiles=all_time_profiles is_monthly=False %}
   </section>
   <section class="col-12 col-lg-6" id="leaderboard-monthly" aria-labelledby="lb-monthly-heading">
-    <h2 class="h5 mb-2" id="lb-monthly-heading">Monthly</h2>
-    {% include "predictions/_leaderboard_table.html" with profiles=monthly_profiles is_monthly=True %}
+    {# Repeated title only when the boards sit side by side; stacked, the one above All-Time covers both. #}
+    <h2 class="h3 mb-3 d-none d-lg-block">Leaderboard</h2>
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-2">
+      <h2 class="h5 mb-0" id="lb-monthly-heading">Monthly</h2>
+      <form method="get" class="d-flex align-items-center gap-2">
+        <label for="lb-month" class="visually-hidden">Month</label>
+        <select name="month" id="lb-month" class="form-select form-select-sm w-auto" onchange="this.form.submit()">
+          {% for option in month_options %}
+            <option value="{{ option.value }}"{% if option.value == selected_month %} selected{% endif %}>{{ option.label }}</option>
+          {% endfor %}
+        </select>
+        <noscript><button type="submit" class="btn btn-sm btn-outline-secondary">Go</button></noscript>
+      </form>
+    </div>
+    {% if is_past_month %}
+      <p class="small text-muted mb-2">Top 3 winners for this month.</p>
+    {% endif %}
+    {% include "predictions/_leaderboard_table.html" with profiles=monthly_profiles is_monthly=True is_past_month=is_past_month %}
   </section>
 </div>
 {% endblock %}

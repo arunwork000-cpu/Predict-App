@@ -33,6 +33,8 @@
       </tbody>
     </table>
   </div>
+{% elif is_past_month %}
+  <p class="text-muted">No winners recorded for this month.</p>
 {% else %}
   <p class="text-muted">No players yet. Register to appear on the board.</p>
 {% endif %}
