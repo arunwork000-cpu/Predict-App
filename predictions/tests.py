@@ -21,11 +21,29 @@ from django.test import Client, RequestFactory, SimpleTestCase, TestCase, overri
 from django.urls import reverse
 from django.utils import timezone
 
-from .admin import MatchAdmin
+from .admin import MatchAdmin, VoucherRedemptionAdmin
 from .constants import SUPPORTED_SPORTS
 from .locations import STATES_BY_COUNTRY
-from .models import Match, Prediction, Profile, ScoreAdjustment, Sport, Team
-from .services import POINTS_CORRECT, POINTS_WRONG, score_match
+from .models import (
+    CreditLedger,
+    Match,
+    Prediction,
+    Profile,
+    Referral,
+    ReferralSettings,
+    ScoreAdjustment,
+    Sport,
+    Team,
+    VoucherRedemption,
+)
+from .services import (
+    POINTS_CORRECT,
+    POINTS_WRONG,
+    fulfill_redemption,
+    redeem_credits,
+    reject_redemption,
+    score_match,
+)
 from .templatetags.prediction_extras import signed_points, team_flag
 
 # A valid 1x1 transparent PNG, used as dummy upload data for flag tests.
@@ -1096,12 +1114,13 @@ class MyPredictionsViewTests(TestCase):
         self.bob = make_user("bob", password="pass12345")
         self.url = reverse("my_predictions")
 
-    def _match(self, label):
+    def _match(self, label, **kwargs):
         sport = Sport.objects.create(name=f"Sport {label}")
         return future_match(
             sport=sport,
             team_a=Team.objects.create(name=f"A {label}", sport=sport),
             team_b=Team.objects.create(name=f"B {label}", sport=sport),
+            **kwargs,
         )
 
     def _score(self, match, winning_side):
@@ -1204,7 +1223,16 @@ class MyPredictionsViewTests(TestCase):
         self.assertNotContains(response, "Miss")
 
     def test_awaiting_result_prediction_shows_badge_and_stays_pending(self):
-        match = self._match("awaiting")
+        # A past deadline, not just the status field: sync_match_statuses()
+        # (called by every view, including this one) reverts an Awaiting
+        # Result match with no result back to Scheduled once its deadline
+        # is in the future, so this must stay genuinely past-deadline.
+        now = timezone.now()
+        match = self._match(
+            "awaiting",
+            start_time=now - timedelta(hours=1),
+            prediction_deadline=now - timedelta(hours=1),
+        )
         Prediction.objects.create(user=self.alice, match=match, choice="A")
         match.status = Match.Status.AWAITING_RESULT
         match.save()
@@ -1306,7 +1334,16 @@ class MatchDetailViewTests(TestCase):
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
     def test_awaiting_result_match_shows_awaiting_state(self):
-        match = self._match("awaiting", status=Match.Status.AWAITING_RESULT)
+        # A past deadline, not just the status field: sync_match_statuses()
+        # reverts an Awaiting Result match with no result back to Scheduled
+        # once its deadline is in the future again.
+        now = timezone.now()
+        match = self._match(
+            "awaiting",
+            status=Match.Status.AWAITING_RESULT,
+            start_time=now - timedelta(hours=1),
+            prediction_deadline=now - timedelta(hours=1),
+        )
         response = self.client.get(reverse("match_detail", args=[match.pk]))
         self.assertEqual(response.context["state"], "awaiting")
         self.assertContains(response, "Awaiting result")
@@ -2078,8 +2115,15 @@ class ClosedMatchesViewTests(TestCase):
         self.assertContains(response, "no result will be recorded")
 
     def test_awaiting_result_match_is_shown(self):
+        # A past deadline, not just the status field: sync_match_statuses()
+        # reverts an Awaiting Result match with no result back to Scheduled
+        # once its deadline is in the future again.
         sport_match(
-            "Football", "FA wait", "FB wait", status=Match.Status.AWAITING_RESULT
+            "Football",
+            "FA wait",
+            "FB wait",
+            status=Match.Status.AWAITING_RESULT,
+            **self._past_deadline_kwargs(),
         )
 
         response = self.client.get(reverse("closed_matches"))
@@ -2871,6 +2915,42 @@ class AwaitingResultStatusTests(TestCase):
         self.assertEqual(match.status, Match.Status.SCHEDULED)
         self.assertTrue(match.predictions_open)
 
+    def test_extending_deadline_moves_awaiting_match_back_to_scheduled(self):
+        from .services import sync_match_statuses
+
+        match = self._past_match()
+        sync_match_statuses()
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.AWAITING_RESULT)
+
+        # Admin delays kickoff: push start_time and prediction_deadline
+        # into the future again, with no result entered.
+        future = timezone.now() + timedelta(hours=2)
+        match.start_time = future
+        match.prediction_deadline = future
+        match.save()
+
+        self.assertEqual(sync_match_statuses(), 1)
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.SCHEDULED)
+        self.assertTrue(match.predictions_open)
+
+    def test_extending_deadline_does_not_revert_a_finished_match(self):
+        from .services import sync_match_statuses
+
+        match = self._past_match()
+        match.winner = match.team_a
+        match.save()
+        self.assertEqual(match.status, Match.Status.FINISHED)
+
+        future = timezone.now() + timedelta(hours=2)
+        match.prediction_deadline = future
+        match.save()
+
+        sync_match_statuses()
+        match.refresh_from_db()
+        self.assertEqual(match.status, Match.Status.FINISHED)
+
 
 class RetireLiveStatusMigrationTests(TestCase):
     """0012 converts leftover Live matches to a status that still exists."""
@@ -3462,3 +3542,300 @@ class MatchTitleAndPointsMarkupTests(TestCase):
                 self.assertContains(response, "If Lose/Draw get: <strong>-5</strong>")
                 self.assertContains(response, "If Draw get: <strong>+7</strong>")
                 self.assertContains(response, "If Win/Lose get: <strong>-2</strong>")
+
+
+class ReferralCodeGenerationTests(TestCase):
+    def test_profile_gets_a_referral_code_on_creation(self):
+        user = make_user("alice", password="pass12345")
+        self.assertEqual(len(user.profile.referral_code), 8)
+
+    def test_referral_codes_are_unique_across_many_users(self):
+        codes = set()
+        for i in range(25):
+            user = make_user(f"user{i}", password="pass12345")
+            codes.add(user.profile.referral_code)
+        self.assertEqual(len(codes), 25)
+
+
+class ReferralSignupTests(TestCase):
+    def setUp(self):
+        self.referrer = make_user("referrer", password="pass12345")
+        self.code = self.referrer.profile.referral_code
+
+    def test_referral_link_query_param_prefills_the_form(self):
+        response = self.client.get(reverse("register") + f"?ref={self.code}")
+        self.assertContains(response, f'value="{self.code}"')
+
+    def test_valid_code_creates_a_pending_referral(self):
+        response = self.client.post(
+            reverse("register"), registration_data(referral_code=self.code)
+        )
+        self.assertRedirects(response, reverse("match_list"))
+        new_user = User.objects.get(username="newuser")
+        referral = Referral.objects.get(referred_user=new_user)
+        self.assertEqual(referral.referrer, self.referrer)
+        self.assertEqual(referral.status, Referral.Status.PENDING)
+        self.assertIsNone(referral.credited_at)
+
+    def test_lowercase_code_still_matches(self):
+        response = self.client.post(
+            reverse("register"),
+            registration_data(referral_code=self.code.lower()),
+        )
+        self.assertRedirects(response, reverse("match_list"))
+        new_user = User.objects.get(username="newuser")
+        self.assertTrue(Referral.objects.filter(referred_user=new_user).exists())
+
+    def test_unknown_code_blocks_signup_with_a_form_error(self):
+        response = self.client.post(
+            reverse("register"), registration_data(referral_code="NOTREAL1")
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+        self.assertIn("referral_code", response.context["form"].errors)
+
+    def test_blank_code_is_optional_and_creates_no_referral(self):
+        response = self.client.post(reverse("register"), registration_data())
+        self.assertRedirects(response, reverse("match_list"))
+        new_user = User.objects.get(username="newuser")
+        self.assertFalse(Referral.objects.filter(referred_user=new_user).exists())
+
+    def test_referred_user_can_only_be_referred_once(self):
+        other_referrer = make_user("other", password="pass12345")
+        new_user = make_user("newuser2", password="pass12345")
+        Referral.objects.create(
+            referrer=self.referrer, referred_user=new_user, code_used=self.code
+        )
+        with self.assertRaises(IntegrityError):
+            Referral.objects.create(
+                referrer=other_referrer,
+                referred_user=new_user,
+                code_used=other_referrer.profile.referral_code,
+            )
+
+    def test_self_referral_is_blocked_at_the_database_level(self):
+        with self.assertRaises(IntegrityError):
+            Referral.objects.create(
+                referrer=self.referrer,
+                referred_user=self.referrer,
+                code_used=self.code,
+            )
+
+
+class ReferralCreditingTests(TestCase):
+    def setUp(self):
+        self.referrer = make_user("referrer", password="pass12345")
+        self.referred = make_user("referred", password="pass12345")
+        self.referral = Referral.objects.create(
+            referrer=self.referrer,
+            referred_user=self.referred,
+            code_used=self.referrer.profile.referral_code,
+        )
+        self.match = future_match()
+
+    def _credits(self, user):
+        user.profile.refresh_from_db()
+        return user.profile.credits
+
+    def test_first_prediction_credits_the_referrer(self):
+        self.client.login(username="referred", password="pass12345")
+        self.client.post(reverse("predict", args=[self.match.pk]), {"choice": "A"})
+        self.assertEqual(self._credits(self.referrer), 10)
+        self.referral.refresh_from_db()
+        self.assertEqual(self.referral.status, Referral.Status.CREDITED)
+        self.assertIsNotNone(self.referral.credited_at)
+        ledger = CreditLedger.objects.get(user=self.referrer)
+        self.assertEqual(ledger.delta, 10)
+        self.assertEqual(ledger.reason, CreditLedger.Reason.REFERRAL_EARNED)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("credit", mail.outbox[0].subject.lower())
+
+    def test_second_prediction_on_another_match_does_not_credit_again(self):
+        second_match = future_match()
+        self.client.login(username="referred", password="pass12345")
+        self.client.post(reverse("predict", args=[self.match.pk]), {"choice": "A"})
+        self.client.post(reverse("predict", args=[second_match.pk]), {"choice": "A"})
+        self.assertEqual(self._credits(self.referrer), 10)
+        self.assertEqual(CreditLedger.objects.filter(user=self.referrer).count(), 1)
+
+    def test_re_predicting_the_same_match_does_not_credit_again(self):
+        self.client.login(username="referred", password="pass12345")
+        self.client.post(reverse("predict", args=[self.match.pk]), {"choice": "A"})
+        self.client.post(reverse("predict", args=[self.match.pk]), {"choice": "B"})
+        self.assertEqual(self._credits(self.referrer), 10)
+
+    def test_non_referred_users_prediction_does_not_credit_anyone(self):
+        other = make_user("other", password="pass12345")
+        self.client.login(username="other", password="pass12345")
+        self.client.post(reverse("predict", args=[self.match.pk]), {"choice": "A"})
+        self.assertEqual(self._credits(self.referrer), 0)
+        self.assertFalse(CreditLedger.objects.exists())
+
+    def test_uses_admin_configured_credit_amount(self):
+        settings_row = ReferralSettings.load()
+        settings_row.credits_per_referral = 42
+        settings_row.save()
+        self.client.login(username="referred", password="pass12345")
+        self.client.post(reverse("predict", args=[self.match.pk]), {"choice": "A"})
+        self.assertEqual(self._credits(self.referrer), 42)
+
+    def test_referral_credits_never_touch_profile_points(self):
+        self.client.login(username="referred", password="pass12345")
+        self.client.post(reverse("predict", args=[self.match.pk]), {"choice": "A"})
+        self.referrer.profile.refresh_from_db()
+        self.assertEqual(self.referrer.profile.points, 0)
+
+
+class VoucherRedemptionServiceTests(TestCase):
+    def setUp(self):
+        self.user = make_user("alice", password="pass12345")
+        # Explicit, not the model default, so these tests don't silently
+        # change meaning if the admin-configurable default is ever tweaked.
+        settings_row = ReferralSettings.load()
+        settings_row.redemption_threshold = 500
+        settings_row.save()
+
+    def _credits(self):
+        self.user.profile.refresh_from_db()
+        return self.user.profile.credits
+
+    def test_redeem_below_threshold_returns_none_and_changes_nothing(self):
+        Profile.objects.filter(user=self.user).update(credits=100)
+        self.assertIsNone(redeem_credits(self.user))
+        self.assertEqual(self._credits(), 100)
+        self.assertFalse(VoucherRedemption.objects.exists())
+
+    def test_redeem_at_threshold_deducts_exactly_the_threshold(self):
+        Profile.objects.filter(user=self.user).update(credits=500)
+        redemption = redeem_credits(self.user)
+        self.assertIsNotNone(redemption)
+        self.assertEqual(redemption.credits_spent, 500)
+        self.assertEqual(redemption.status, VoucherRedemption.Status.PENDING)
+        self.assertEqual(self._credits(), 0)
+        ledger = CreditLedger.objects.get(redemption=redemption)
+        self.assertEqual(ledger.delta, -500)
+        self.assertEqual(ledger.reason, CreditLedger.Reason.REDEMPTION_SPENT)
+
+    def test_can_redeem_more_than_once_if_balance_allows(self):
+        Profile.objects.filter(user=self.user).update(credits=1200)
+        redeem_credits(self.user)
+        redeem_credits(self.user)
+        self.assertEqual(self._credits(), 200)
+        self.assertEqual(VoucherRedemption.objects.filter(user=self.user).count(), 2)
+
+    def test_fulfill_marks_fulfilled_and_sends_email(self):
+        Profile.objects.filter(user=self.user).update(credits=500)
+        redemption = redeem_credits(self.user)
+        self.assertTrue(fulfill_redemption(redemption.pk))
+        redemption.refresh_from_db()
+        self.assertEqual(redemption.status, VoucherRedemption.Status.FULFILLED)
+        self.assertIsNotNone(redemption.resolved_at)
+        self.assertEqual(len(mail.outbox), 1)
+        self.assertIn("fulfilled", mail.outbox[0].subject.lower())
+
+    def test_fulfilling_twice_is_a_no_op_the_second_time(self):
+        Profile.objects.filter(user=self.user).update(credits=500)
+        redemption = redeem_credits(self.user)
+        fulfill_redemption(redemption.pk)
+        self.assertFalse(fulfill_redemption(redemption.pk))
+        self.assertEqual(len(mail.outbox), 1)
+
+    def test_reject_refunds_credits_and_records_ledger_row(self):
+        Profile.objects.filter(user=self.user).update(credits=500)
+        redemption = redeem_credits(self.user)
+        self.assertTrue(reject_redemption(redemption.pk))
+        redemption.refresh_from_db()
+        self.assertEqual(redemption.status, VoucherRedemption.Status.REJECTED)
+        self.assertEqual(self._credits(), 500)
+        self.assertEqual(
+            CreditLedger.objects.filter(
+                redemption=redemption, reason=CreditLedger.Reason.REDEMPTION_REFUNDED
+            ).count(),
+            1,
+        )
+
+    def test_rejecting_twice_is_a_no_op_the_second_time(self):
+        Profile.objects.filter(user=self.user).update(credits=500)
+        redemption = redeem_credits(self.user)
+        reject_redemption(redemption.pk)
+        self.assertFalse(reject_redemption(redemption.pk))
+        self.assertEqual(self._credits(), 500)
+
+
+class VoucherRedemptionAdminTests(TestCase):
+    def setUp(self):
+        self.site_admin = AdminSite()
+        self.redemption_admin = VoucherRedemptionAdmin(VoucherRedemption, self.site_admin)
+        self.staff = make_user(
+            "staff", password="pass12345", is_staff=True, is_superuser=True
+        )
+        self.user = make_user("alice", password="pass12345")
+        settings_row = ReferralSettings.load()
+        settings_row.redemption_threshold = 500
+        settings_row.save()
+        Profile.objects.filter(user=self.user).update(credits=500)
+        self.redemption = redeem_credits(self.user)
+        self.factory = RequestFactory()
+
+    def _request(self):
+        request = self.factory.post("/admin/predictions/voucherredemption/")
+        request.user = self.staff
+        request.session = self.client.session
+        request._messages = FallbackStorage(request)
+        return request
+
+    def test_mark_fulfilled_action_fulfills_selected_rows(self):
+        qs = VoucherRedemption.objects.filter(pk=self.redemption.pk)
+        self.redemption_admin.mark_fulfilled(self._request(), qs)
+        self.redemption.refresh_from_db()
+        self.assertEqual(self.redemption.status, VoucherRedemption.Status.FULFILLED)
+
+    def test_reject_and_refund_action_rejects_and_refunds(self):
+        qs = VoucherRedemption.objects.filter(pk=self.redemption.pk)
+        self.redemption_admin.reject_and_refund(self._request(), qs)
+        self.redemption.refresh_from_db()
+        self.assertEqual(self.redemption.status, VoucherRedemption.Status.REJECTED)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.credits, 500)
+
+
+class MyAccountPageTests(TestCase):
+    def setUp(self):
+        self.user = make_user("alice", password="pass12345")
+
+    def test_requires_login(self):
+        response = self.client.get(reverse("my_account"))
+        self.assertEqual(response.status_code, 302)
+
+    def test_shows_referral_link_with_own_code(self):
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(reverse("my_account"))
+        code = self.user.profile.referral_code
+        self.assertContains(response, code)
+        self.assertContains(response, reverse("register") + f"?ref={code}")
+
+    def test_redeem_button_disabled_below_threshold(self):
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(reverse("my_account"))
+        self.assertContains(response, "disabled")
+
+    def test_redeem_button_enabled_at_threshold(self):
+        threshold = ReferralSettings.load().redemption_threshold
+        Profile.objects.filter(user=self.user).update(credits=threshold)
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(reverse("my_account"))
+        self.assertTrue(response.context["can_redeem"])
+
+    def test_redeem_view_creates_pending_redemption_when_eligible(self):
+        threshold = ReferralSettings.load().redemption_threshold
+        Profile.objects.filter(user=self.user).update(credits=threshold)
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.post(reverse("redeem_credits"))
+        self.assertRedirects(response, reverse("my_account"))
+        self.assertTrue(VoucherRedemption.objects.filter(user=self.user).exists())
+
+    def test_redeem_view_does_nothing_when_not_eligible(self):
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.post(reverse("redeem_credits"))
+        self.assertRedirects(response, reverse("my_account"))
+        self.assertFalse(VoucherRedemption.objects.exists())

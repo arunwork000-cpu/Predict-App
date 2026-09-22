@@ -4,8 +4,24 @@ from django import forms
 from django.contrib import admin, messages
 from django.utils.html import format_html
 
-from .models import Match, Prediction, Profile, ScoreAdjustment, Sport, Team
-from .services import score_match, sync_match_statuses
+from .models import (
+    CreditLedger,
+    Match,
+    Prediction,
+    Profile,
+    Referral,
+    ReferralSettings,
+    ScoreAdjustment,
+    Sport,
+    Team,
+    VoucherRedemption,
+)
+from .services import (
+    fulfill_redemption,
+    reject_redemption,
+    score_match,
+    sync_match_statuses,
+)
 
 
 @admin.register(Sport)
@@ -37,12 +53,13 @@ class TeamAdmin(admin.ModelAdmin):
 @admin.register(Profile)
 class ProfileAdmin(admin.ModelAdmin):
     # country/state stay editable (not in readonly_fields) so an admin can
-    # correct a legacy account that has none, or fix a typo.
-    list_display = ("user", "points", "age", "state", "country")
+    # correct a legacy account that has none, or fix a typo. points/credits
+    # and referral_code are system-managed -- see services.py.
+    list_display = ("user", "points", "credits", "referral_code", "age", "state", "country")
     list_filter = ("country",)
-    search_fields = ("user__username", "state", "country")
-    readonly_fields = ("user", "points")
-    fields = ("user", "points", "age", "country", "state")
+    search_fields = ("user__username", "state", "country", "referral_code")
+    readonly_fields = ("user", "points", "credits", "referral_code")
+    fields = ("user", "points", "credits", "referral_code", "age", "country", "state")
 
 
 def _int_or_none(value):
@@ -229,6 +246,78 @@ class ScoreAdjustmentAdmin(admin.ModelAdmin):
     list_display = ("user", "match", "delta", "created_at")
     list_filter = ("created_at",)
     search_fields = ("user__username", "match__team_a__name", "match__team_b__name")
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ReferralSettings)
+class ReferralSettingsAdmin(admin.ModelAdmin):
+    """Singleton: credits per referral and the redemption threshold."""
+
+    fields = ("credits_per_referral", "redemption_threshold")
+
+    def has_add_permission(self, request):
+        return not ReferralSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Referral)
+class ReferralAdmin(admin.ModelAdmin):
+    """Read-only audit trail; status is system-managed (see services.py)."""
+
+    list_display = ("referrer", "referred_user", "status", "created_at", "credited_at")
+    list_filter = ("status",)
+    search_fields = ("referrer__username", "referred_user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(VoucherRedemption)
+class VoucherRedemptionAdmin(admin.ModelAdmin):
+    """Manual fulfillment workflow: an admin arranges the actual voucher
+    outside this system, then runs one of the actions below. `status` stays
+    read-only on the change form so it can only change through those
+    actions, never a stray manual edit."""
+
+    list_display = ("user", "credits_spent", "status", "requested_at", "resolved_at")
+    list_filter = ("status",)
+    search_fields = ("user__username",)
+    readonly_fields = ("user", "credits_spent", "status", "requested_at", "resolved_at")
+    fields = ("user", "credits_spent", "status", "admin_note", "requested_at", "resolved_at")
+    actions = ("mark_fulfilled", "reject_and_refund")
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.action(description="Mark selected as fulfilled")
+    def mark_fulfilled(self, request, queryset):
+        updated = sum(fulfill_redemption(r.pk) for r in queryset)
+        self.message_user(request, f"{updated} redemption(s) marked fulfilled.", messages.SUCCESS)
+
+    @admin.action(description="Reject selected and refund credits")
+    def reject_and_refund(self, request, queryset):
+        updated = sum(reject_redemption(r.pk) for r in queryset)
+        self.message_user(request, f"{updated} redemption(s) rejected and refunded.", messages.SUCCESS)
+
+
+@admin.register(CreditLedger)
+class CreditLedgerAdmin(admin.ModelAdmin):
+    """Read-only audit trail, same convention as ScoreAdjustmentAdmin."""
+
+    list_display = ("user", "delta", "reason", "created_at")
+    list_filter = ("reason",)
+    search_fields = ("user__username",)
     date_hierarchy = "created_at"
 
     def has_add_permission(self, request):

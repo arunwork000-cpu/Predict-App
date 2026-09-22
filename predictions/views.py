@@ -8,14 +8,29 @@ from django.db.models import Sum
 from django.db.models.functions import TruncMonth
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 
 from .constants import DEFAULT_SPORT_SLUG, DRAW_SPORTS, SPORT_SLUGS, SUPPORTED_SPORTS
 from .forms import AddEmailForm, PredictionForm, RegistrationForm
 from .locations import STATES_BY_COUNTRY
-from .models import Match, Prediction, Profile, ScoreAdjustment, StoredFile
-from .services import sync_match_statuses
+from .models import (
+    Match,
+    Prediction,
+    Profile,
+    Referral,
+    ReferralSettings,
+    ScoreAdjustment,
+    StoredFile,
+    VoucherRedemption,
+)
+from .services import (
+    apply_referral_code,
+    credit_referral_if_first_prediction,
+    redeem_credits,
+    sync_match_statuses,
+)
 
 
 def _attach_user_picks(request, matches):
@@ -156,6 +171,7 @@ def predict(request, pk):
                 match=match,
                 defaults={"choice": form.cleaned_data["choice"]},
             )
+            credit_referral_if_first_prediction(request.user)
             messages.success(request, "Your prediction has been saved.")
             return _sport_redirect(match.sport)
     else:
@@ -198,6 +214,54 @@ def my_predictions(request):
         "predictions/my_predictions.html",
         {"pending": pending, "decided": decided, "cancelled": cancelled},
     )
+
+
+@login_required
+def my_account(request):
+    """Referral link, credit wallet and redemption history for the current
+    user. `profile.credits` is entirely separate from `profile.points`
+    (leaderboard) -- see Profile/CreditLedger in models.py."""
+    profile = request.user.profile
+    settings_row = ReferralSettings.load()
+    threshold = settings_row.redemption_threshold
+    referral_link = request.build_absolute_uri(
+        f"{reverse('register')}?ref={profile.referral_code}"
+    )
+    referrals = Referral.objects.filter(referrer=request.user).select_related(
+        "referred_user"
+    )
+    return render(
+        request,
+        "predictions/my_account.html",
+        {
+            "profile": profile,
+            "referral_link": referral_link,
+            "referrals": referrals,
+            "referrals_credited": sum(
+                1 for r in referrals if r.status == Referral.Status.CREDITED
+            ),
+            "redemptions": VoucherRedemption.objects.filter(user=request.user),
+            "credits_threshold": threshold,
+            "progress_pct": min(100, profile.credits * 100 // threshold)
+            if threshold
+            else 0,
+            "can_redeem": profile.credits >= threshold,
+        },
+    )
+
+
+@login_required
+def redeem_credits_view(request):
+    if request.method == "POST":
+        redemption = redeem_credits(request.user)
+        if redemption is None:
+            messages.error(request, "You don't have enough credits to redeem yet.")
+        else:
+            messages.success(
+                request,
+                "Redemption requested — we'll be in touch once it's fulfilled.",
+            )
+    return redirect("my_account")
 
 
 def _all_time_profiles():
@@ -319,11 +383,14 @@ def register(request):
             profile.state = form.cleaned_data["state"]
             profile.age = form.cleaned_data["age"]
             profile.save(update_fields=["country", "state", "age"])
+            apply_referral_code(user, form.cleaned_data["referral_code"])
             login(request, user)
             messages.success(request, "Welcome. You can now make predictions.")
             return redirect("match_list")
     else:
-        form = RegistrationForm()
+        # A referral link looks like /accounts/register/?ref=<code>; prefill
+        # the field so the visitor doesn't have to retype it.
+        form = RegistrationForm(initial={"referral_code": request.GET.get("ref", "")})
     return render(
         request,
         "predictions/register.html",

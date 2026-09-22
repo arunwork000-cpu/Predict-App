@@ -1,0 +1,8 @@
+{% autoescape off %}Hello {{ user.get_username }},
+
+Your request to redeem {{ redemption.credits_spent }} credits for a gift voucher has been fulfilled.
+
+{% if redemption.admin_note %}{{ redemption.admin_note }}{% else %}We'll be in touch separately with your voucher details.{% endif %}
+
+Sports Predictions
+{% endautoescape %}

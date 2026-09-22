@@ -3,8 +3,30 @@ from django.core.exceptions import ValidationError
 from django.core.validators import MaxValueValidator, MinValueValidator
 from django.db import models
 from django.utils import timezone
+from django.utils.crypto import get_random_string
 
 from .constants import DRAW_SPORTS
+
+# Unambiguous alphabet for referral codes: no 0/O/1/I/L, so a code read
+# aloud or typed by hand is never misread as a different valid code.
+REFERRAL_CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+REFERRAL_CODE_LENGTH = 8
+
+
+def generate_referral_code():
+    """A unique, unambiguous referral code for a new Profile.
+
+    Retries on the rare chance of a collision; used by the create_profile
+    signal (see signals.py), not a model default, so it can query for
+    uniqueness against existing rows.
+    """
+    for _ in range(10):
+        code = get_random_string(
+            REFERRAL_CODE_LENGTH, allowed_chars=REFERRAL_CODE_ALPHABET
+        )
+        if not Profile.objects.filter(referral_code=code).exists():
+            return code
+    raise RuntimeError("Could not generate a unique referral code.")
 
 
 class Profile(models.Model):
@@ -24,6 +46,19 @@ class Profile(models.Model):
         null=True,
         blank=True,
         validators=[MinValueValidator(18), MaxValueValidator(99)],
+    )
+    # Referral wallet balance. Entirely separate from `points`: never read by
+    # the leaderboard, never affected by scoring. See CreditLedger for the
+    # audit trail of every change.
+    credits = models.IntegerField(default=0)
+    # Set once, at Profile creation (see signals.create_profile), and never
+    # changed again. Blank only for rows created by a migration before this
+    # field existed with a backfill still pending.
+    referral_code = models.CharField(
+        max_length=REFERRAL_CODE_LENGTH,
+        unique=True,
+        editable=False,
+        default="",
     )
 
     class Meta:
@@ -376,6 +411,175 @@ class ScoreAdjustment(models.Model):
     def __str__(self):
         sign = "+" if self.delta >= 0 else ""
         return f"{self.user} {sign}{self.delta} ({self.match})"
+
+
+class Referral(models.Model):
+    """One row per successful signup made with another user's referral code.
+
+    `referred_user` is a OneToOneField so a user can be referred at most
+    once -- a database-level guarantee, not just app logic. Credit is not
+    awarded at creation: `status` stays "pending" until the referred user
+    submits their first-ever prediction (see
+    services.credit_referral_if_first_prediction), which is the anti-abuse
+    signal this program relies on. Full fraud detection -- duplicate
+    accounts, IP/device checks, velocity limits -- is out of scope.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        CREDITED = "credited", "Credited"
+
+    referrer = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="referrals_made",
+    )
+    referred_user = models.OneToOneField(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="referral_used",
+    )
+    code_used = models.CharField(max_length=REFERRAL_CODE_LENGTH)
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    credited_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        constraints = [
+            models.CheckConstraint(
+                condition=~models.Q(referrer=models.F("referred_user")),
+                name="referral_no_self_referral",
+            ),
+        ]
+
+    def __str__(self):
+        return f"{self.referrer} ← {self.referred_user} ({self.status})"
+
+
+class ReferralSettings(models.Model):
+    """Site-wide referral-program numbers, admin-configurable.
+
+    Singleton: always saved/loaded at pk=1. Nothing else in this codebase
+    has a generic settings row (per-match points live on Match itself), so
+    this introduces the pattern for the referral program only.
+    """
+
+    credits_per_referral = models.PositiveIntegerField(
+        default=10,
+        help_text=(
+            "Credits awarded to the referrer once the referred user "
+            "submits their first prediction."
+        ),
+    )
+    redemption_threshold = models.PositiveIntegerField(
+        default=100,
+        help_text="Credits required to redeem one voucher.",
+    )
+
+    class Meta:
+        verbose_name = "Referral settings"
+        verbose_name_plural = "Referral settings"
+
+    def __str__(self):
+        return "Referral settings"
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        super().save(*args, **kwargs)
+
+    @classmethod
+    def load(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+
+class VoucherRedemption(models.Model):
+    """A user's request to trade credits for a gift voucher.
+
+    Fulfillment is manual: an admin arranges the actual voucher outside
+    this system, then marks the request Fulfilled (or Rejected, which
+    refunds the credits) via an admin action -- see admin.py and
+    services.fulfill_redemption / reject_redemption.
+    """
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        FULFILLED = "fulfilled", "Fulfilled"
+        REJECTED = "rejected", "Rejected"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="voucher_redemptions",
+    )
+    # Always ReferralSettings.redemption_threshold at request time, not the
+    # user's whole balance, so a user with enough credits for several
+    # vouchers can redeem more than once.
+    credits_spent = models.PositiveIntegerField()
+    status = models.CharField(
+        max_length=20, choices=Status.choices, default=Status.PENDING
+    )
+    requested_at = models.DateTimeField(auto_now_add=True)
+    resolved_at = models.DateTimeField(null=True, blank=True)
+    admin_note = models.CharField(
+        max_length=255,
+        blank=True,
+        default="",
+        help_text="Optional note, e.g. the voucher code/reference sent manually.",
+    )
+
+    class Meta:
+        ordering = ["-requested_at"]
+
+    def __str__(self):
+        return f"{self.user} — {self.credits_spent} credits ({self.status})"
+
+
+class CreditLedger(models.Model):
+    """One row per change to a user's `Profile.credits`.
+
+    Mirrors ScoreAdjustment: the *delta*, not the balance, so summing these
+    for a user is always an accurate audit trail of the wallet, independent
+    of `Profile.credits` itself.
+    """
+
+    class Reason(models.TextChoices):
+        REFERRAL_EARNED = "referral_earned", "Referral earned"
+        REDEMPTION_SPENT = "redemption_spent", "Redemption spent"
+        REDEMPTION_REFUNDED = "redemption_refunded", "Redemption refunded"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="credit_adjustments",
+    )
+    delta = models.IntegerField()
+    reason = models.CharField(max_length=20, choices=Reason.choices)
+    referral = models.ForeignKey(
+        Referral,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_entries",
+    )
+    redemption = models.ForeignKey(
+        VoucherRedemption,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="credit_entries",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        sign = "+" if self.delta >= 0 else ""
+        return f"{self.user} {sign}{self.delta} ({self.reason})"
 
 
 class StoredFile(models.Model):

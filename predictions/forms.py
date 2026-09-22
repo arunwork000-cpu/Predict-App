@@ -3,7 +3,7 @@ from django.contrib.auth.forms import UserCreationForm
 from django.contrib.auth.models import User
 
 from .locations import COUNTRY_CHOICES, STATE_CHOICES, states_for
-from .models import Match, Prediction
+from .models import Match, Prediction, Profile
 
 
 MIN_AGE = 18
@@ -42,6 +42,13 @@ class RegistrationForm(UserCreationForm):
         empty_value=None,
         label="Age",
     )
+    referral_code = forms.CharField(
+        required=False,
+        max_length=10,
+        label="Referral code (optional)",
+        help_text="Got a link from a friend? Their code is prefilled; you can also type it in.",
+        widget=forms.TextInput(attrs={"placeholder": "e.g. AB3KX9QZ"}),
+    )
 
     field_order = [
         "username",
@@ -51,6 +58,7 @@ class RegistrationForm(UserCreationForm):
         "country",
         "state",
         "age",
+        "referral_code",
     ]
 
     class Meta(UserCreationForm.Meta):
@@ -59,6 +67,14 @@ class RegistrationForm(UserCreationForm):
 
     def clean_email(self):
         return unique_email(self.cleaned_data["email"])
+
+    def clean_referral_code(self):
+        code = self.cleaned_data["referral_code"].strip().upper()
+        if not code:
+            return ""
+        if not Profile.objects.filter(referral_code=code).exists():
+            raise forms.ValidationError("We couldn't find that referral code.")
+        return code
 
     def clean(self):
         cleaned_data = super().clean()

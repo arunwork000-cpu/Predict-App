@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block title %}My Account{% endblock %}
+{% block content %}
+<h1 class="h3 mb-3">My Account</h1>
+
+<div class="row g-4">
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h5">Your referral link</h2>
+        <p class="text-muted">
+          Share this link. Once someone registers with it and makes their
+          first prediction, you earn credits toward a gift voucher.
+        </p>
+        <div class="input-group mb-2">
+          <input type="text" id="referral-link" class="form-control" value="{{ referral_link }}" readonly>
+          <button type="button" class="btn btn-outline-secondary" id="copy-referral-link">Copy</button>
+        </div>
+        <p class="small text-muted mb-0" id="copy-confirmation" style="display: none;">Copied!</p>
+        <hr>
+        <p class="mb-0">
+          <strong>{{ referrals.count }}</strong> friend{{ referrals.count|pluralize }} referred
+          &middot; <strong>{{ referrals_credited }}</strong> credited
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <div class="col-lg-6">
+    <div class="card h-100">
+      <div class="card-body">
+        <h2 class="h5">Credit wallet</h2>
+        <p class="display-6 mb-1">{{ profile.credits }} <span class="fs-6 text-muted">credits</span></p>
+        {% if credits_threshold %}
+          <div class="progress mb-2" role="progressbar" aria-valuenow="{{ progress_pct }}" aria-valuemin="0" aria-valuemax="100">
+            <div class="progress-bar" style="width: {{ progress_pct }}%">{{ progress_pct }}%</div>
+          </div>
+          <p class="small text-muted">
+            {{ credits_threshold }} credits needed to redeem a voucher.
+          </p>
+          <form method="post" action="{% url 'redeem_credits' %}">
+            {% csrf_token %}
+            <button type="submit" class="btn btn-primary" {% if not can_redeem %}disabled{% endif %}>
+              Redeem for a gift voucher
+            </button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+
+<h2 class="h5 mt-4">Redemption history</h2>
+{% if redemptions %}
+  <div class="table-responsive">
+    <table class="table bg-white align-middle">
+      <thead>
+        <tr>
+          <th scope="col">Requested</th>
+          <th scope="col">Credits spent</th>
+          <th scope="col">Status</th>
+          <th scope="col">Note</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in redemptions %}
+          <tr>
+            <td>{{ r.requested_at|date:"N j, Y, P T" }}</td>
+            <td>{{ r.credits_spent }}</td>
+            <td>
+              {% if r.status == "pending" %}
+                <span class="badge text-bg-secondary">Pending</span>
+              {% elif r.status == "fulfilled" %}
+                <span class="badge text-bg-success">Fulfilled</span>
+              {% else %}
+                <span class="badge text-bg-danger">Rejected</span>
+              {% endif %}
+            </td>
+            <td>{{ r.admin_note|default:"" }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% else %}
+  <p class="text-muted">No redemptions yet.</p>
+{% endif %}
+
+<script>
+  (function () {
+    var button = document.getElementById("copy-referral-link");
+    var input = document.getElementById("referral-link");
+    var confirmation = document.getElementById("copy-confirmation");
+    if (!button || !input) return;
+    button.addEventListener("click", function () {
+      input.select();
+      input.setSelectionRange(0, 99999);
+      var done = function () {
+        if (confirmation) {
+          confirmation.style.display = "block";
+          setTimeout(function () { confirmation.style.display = "none"; }, 2000);
+        }
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(input.value).then(done).catch(function () {
+          document.execCommand("copy");
+          done();
+        });
+      } else {
+        document.execCommand("copy");
+        done();
+      }
+    });
+  })();
+</script>
+{% endblock %}

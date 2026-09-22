@@ -119,6 +119,10 @@
             <li class="nav-item">
               <a class="nav-link" href="{% url 'my_predictions' %}">My Predictions</a>
             </li>
+            <li class="nav-item">
+              <a class="nav-link {% if request.resolver_match.url_name == 'my_account' %}active{% endif %}"
+                 href="{% url 'my_account' %}">My Account</a>
+            </li>
           {% endif %}
           <li class="nav-item">
             <a class="nav-link {% if request.resolver_match.url_name == 'leaderboard' %}active{% endif %}"
