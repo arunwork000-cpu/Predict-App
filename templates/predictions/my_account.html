@@ -1,7 +1,33 @@
 {% extends "base.html" %}
 {% block title %}My Account{% endblock %}
 {% block content %}
-<h1 class="h3 mb-3">My Account</h1>
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h1 class="h3 mb-0">My Account</h1>
+  <a class="btn btn-outline-secondary btn-sm" href="{% url 'password_change' %}">Change password</a>
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <div class="row text-center g-3">
+      <div class="col-6 col-md-3">
+        <div class="h4 mb-0">{{ all_time_points }}</div>
+        <div class="small text-muted">All-time points</div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="h4 mb-0">#{{ all_time_rank }}</div>
+        <div class="small text-muted">All-time rank</div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="h4 mb-0">{{ monthly_points }}</div>
+        <div class="small text-muted">This month's points</div>
+      </div>
+      <div class="col-6 col-md-3">
+        <div class="h4 mb-0">#{{ monthly_rank }}</div>
+        <div class="small text-muted">This month's rank</div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <div class="row g-4">
   <div class="col-lg-6">
@@ -11,6 +37,7 @@
         <p class="text-muted">
           Share this link. Once someone registers with it and makes their
           first prediction, you earn credits toward a gift voucher.
+          You will earn {{ credits_per_referral }} credits per referral & first prediction.
         </p>
         <div class="input-group mb-2">
           <input type="text" id="referral-link" class="form-control" value="{{ referral_link }}" readonly>

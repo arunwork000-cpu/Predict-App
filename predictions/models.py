@@ -178,6 +178,7 @@ class Match(models.Model):
 
     class Meta:
         ordering = ["start_time"]
+        verbose_name_plural = "Matches"
         constraints = [
             models.CheckConstraint(
                 condition=~models.Q(team_a=models.F("team_b")),

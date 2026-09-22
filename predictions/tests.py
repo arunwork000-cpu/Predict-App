@@ -807,9 +807,9 @@ class PasswordChangeFlowTests(TestCase):
         self.assertContains(response, "Sports Predictions")
         self.assertNotContains(response, 'id="content-main"')
 
-    def test_navbar_exposes_change_password_link(self):
+    def test_my_account_exposes_change_password_link(self):
         self._login()
-        response = self.client.get(reverse("match_list"))
+        response = self.client.get(reverse("my_account"))
         self.assertContains(response, reverse("password_change"))
         self.assertContains(response, "Change password")
 
@@ -1774,6 +1774,20 @@ class PastMonthLeaderboardTests(TestCase):
         self.assertEqual(last_names, ["last_second"])
 
 
+class VoucherAnnouncementTests(TestCase):
+    """Temporary October-2026 voucher promo banner on the Monthly board."""
+
+    def test_shown_on_or_before_october_2026(self):
+        with mock.patch("predictions.views._current_month", return_value=(2026, 10)):
+            response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, "Gift vouchers are expected to be issued")
+
+    def test_hidden_from_november_2026(self):
+        with mock.patch("predictions.views._current_month", return_value=(2026, 11)):
+            response = self.client.get(reverse("leaderboard"))
+        self.assertNotContains(response, "Gift vouchers are expected to be issued")
+
+
 class LeaderboardMedalTests(TestCase):
     """Gold/silver/bronze medal images next to the top three rows only."""
 
@@ -2237,9 +2251,21 @@ class PublicNavTests(TestCase):
         response = self.client.get(reverse("match_list"))
         self.assertIn("Predict now", self._sport_link(response, "football"))
 
-        Prediction.objects.create(user=user, match=second, choice=Prediction.Side.B)
+    def _my_account_link(self, response):
+        content = response.content.decode()
+        link = content[content.index('href="/account/"'):]
+        return link[: link.index("</a>")]
+
+    def test_redeem_credits_badge_always_shown_for_authenticated_user(self):
+        user = make_user("redeem_visible")  # credits default to 0, well below threshold
+        self.client.force_login(user)
+
         response = self.client.get(reverse("match_list"))
-        self.assertNotIn("Predict now", self._sport_link(response, "football"))
+        self.assertIn("Redeem Credits", self._my_account_link(response))
+
+    def test_redeem_credits_badge_hidden_for_anonymous_visitor(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertNotContains(response, "Redeem Credits")
 
     def test_predict_now_badge_ignores_other_users_predictions(self):
         other = make_user("pn_other")
@@ -3839,3 +3865,38 @@ class MyAccountPageTests(TestCase):
         response = self.client.post(reverse("redeem_credits"))
         self.assertRedirects(response, reverse("my_account"))
         self.assertFalse(VoucherRedemption.objects.exists())
+
+    def test_referral_note_shows_live_credits_per_referral(self):
+        ReferralSettings.load()
+        ReferralSettings.objects.update(credits_per_referral=25)
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(reverse("my_account"))
+        self.assertContains(response, "You will earn 25 credits per referral & first prediction.")
+
+    def test_all_time_points_and_rank(self):
+        Profile.objects.filter(user=self.user).update(points=40)
+        make_user("bob", password="pass12345")
+        Profile.objects.filter(user__username="bob").update(points=100)
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(reverse("my_account"))
+        self.assertEqual(response.context["all_time_points"], 40)
+        self.assertEqual(response.context["all_time_rank"], 2)
+
+    def test_all_time_rank_ties_break_by_username(self):
+        Profile.objects.filter(user=self.user).update(points=40)
+        make_user("aaron", password="pass12345")
+        Profile.objects.filter(user__username="aaron").update(points=40)
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(reverse("my_account"))
+        # "aaron" sorts before "alice" at the same point total.
+        self.assertEqual(response.context["all_time_rank"], 2)
+
+    def test_current_month_points_and_rank(self):
+        match = future_match()
+        ScoreAdjustment.objects.create(user=self.user, match=match, delta=15)
+        bob = make_user("bob", password="pass12345")
+        ScoreAdjustment.objects.create(user=bob, match=match, delta=30)
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(reverse("my_account"))
+        self.assertEqual(response.context["monthly_points"], 15)
+        self.assertEqual(response.context["monthly_rank"], 2)

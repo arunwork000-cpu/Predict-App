@@ -119,10 +119,6 @@
             <li class="nav-item">
               <a class="nav-link" href="{% url 'my_predictions' %}">My Predictions</a>
             </li>
-            <li class="nav-item">
-              <a class="nav-link {% if request.resolver_match.url_name == 'my_account' %}active{% endif %}"
-                 href="{% url 'my_account' %}">My Account</a>
-            </li>
           {% endif %}
           <li class="nav-item">
             <a class="nav-link {% if request.resolver_match.url_name == 'leaderboard' %}active{% endif %}"
@@ -138,7 +134,11 @@
               <span class="badge text-bg-warning">{{ user_points }} pts</span>
             </li>
             <li class="nav-item">
-              <a class="nav-link" href="{% url 'password_change' %}">Change password</a>
+              <a class="nav-link lh-sm {% if request.resolver_match.url_name == 'my_account' %}active{% endif %}"
+                 href="{% url 'my_account' %}">
+                My Account
+                <span class="badge text-bg-success d-block predict-now-badge">Redeem Credits</span>
+              </a>
             </li>
             <li class="nav-item">
               {# Django logout is POST-only so we use a small form, not a link. #}

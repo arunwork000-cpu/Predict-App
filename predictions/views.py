@@ -4,7 +4,7 @@ import json
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
-from django.db.models import Sum
+from django.db.models import Q, Sum
 from django.db.models.functions import TruncMonth
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -230,6 +230,18 @@ def my_account(request):
     referrals = Referral.objects.filter(referrer=request.user).select_related(
         "referred_user"
     )
+
+    all_time_rank = Profile.objects.filter(
+        Q(points__gt=profile.points)
+        | Q(points=profile.points, user__username__lt=profile.user.username)
+    ).count() + 1
+
+    monthly_points, monthly_rank = 0, None
+    for i, p in enumerate(_monthly_profiles(*_current_month()), start=1):
+        if p.user_id == request.user.id:
+            monthly_points, monthly_rank = p.monthly_points, i
+            break
+
     return render(
         request,
         "predictions/my_account.html",
@@ -240,12 +252,17 @@ def my_account(request):
             "referrals_credited": sum(
                 1 for r in referrals if r.status == Referral.Status.CREDITED
             ),
+            "credits_per_referral": settings_row.credits_per_referral,
             "redemptions": VoucherRedemption.objects.filter(user=request.user),
             "credits_threshold": threshold,
             "progress_pct": min(100, profile.credits * 100 // threshold)
             if threshold
             else 0,
             "can_redeem": profile.credits >= threshold,
+            "all_time_points": profile.points,
+            "all_time_rank": all_time_rank,
+            "monthly_points": monthly_points,
+            "monthly_rank": monthly_rank,
         },
     )
 
@@ -326,6 +343,9 @@ def leaderboard(request):
     YYYY-MM` picks an earlier month, which shows only its top 3.
     """
     current = _current_month()
+    # Temporary promo for the October 2026 voucher draw; gone for good once
+    # November 2026 starts. Remove this once it's no longer needed.
+    show_voucher_announcement = current <= (2026, 10)
     selected = _parse_month(request.GET.get("month"))
     if selected is None or selected > current:
         selected = current
@@ -364,6 +384,7 @@ def leaderboard(request):
             "is_past_month": is_past_month,
             "selected_month": f"{selected[0]:04d}-{selected[1]:02d}",
             "month_options": month_options,
+            "show_voucher_announcement": show_voucher_announcement,
         },
     )
 
