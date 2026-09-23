@@ -84,6 +84,23 @@
     .leaderboard-table td:last-child {
       width: 5.5rem;
     }
+    /* Right-align Count/Points so the ones digit stays in a fixed column as
+       the number gains digits, instead of shifting left-to-right. */
+    .leaderboard-table td:nth-last-child(2) {
+      text-align: right;
+    }
+    .leaderboard-table td:last-child {
+      text-align: right;
+      position: relative;
+      padding-right: 34px; /* reserved for the medal icon, present or not */
+    }
+    .leaderboard-table td:last-child .medal-icon {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      margin-left: 0;
+    }
     @media (max-width: 575.98px) {
       .medal-icon {
         width: 24px;
