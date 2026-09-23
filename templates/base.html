@@ -91,15 +91,11 @@
     .leaderboard-table td:last-child {
       width: 5.5rem;
     }
-    /* Long Player/State/Country values shrink to fit instead of stretching
-       the row past the mobile viewport; an outlier that's still too long
-       even at the smaller size is truncated with an ellipsis. */
+    /* Long Player/State/Country values are truncated with an ellipsis
+       instead of stretching the row past the mobile viewport. */
     .leaderboard-table .lb-cell {
       overflow: hidden;
       text-overflow: ellipsis;
-    }
-    .leaderboard-table .lb-cell-long {
-      font-size: 0.75rem;
     }
     .leaderboard-table th:nth-child(2),
     .leaderboard-table td:nth-child(2) {
