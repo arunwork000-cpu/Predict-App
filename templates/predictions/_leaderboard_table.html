@@ -16,9 +16,9 @@
         {% for profile in profiles %}
           <tr {% if user.is_authenticated and profile.user_id == user.id %}class="table-warning"{% endif %}>
             <td>{{ forloop.counter }}</td>
-            <td>{{ profile.user.username }}</td>
-            <td>{{ profile.state|default:"—" }}</td>
-            <td>{{ profile.country|default:"—" }}</td>
+            <td class="lb-cell{% if profile.user.username|length > 10 %} lb-cell-long{% endif %}">{{ profile.user.username }}</td>
+            <td class="lb-cell{% if profile.state|length > 10 %} lb-cell-long{% endif %}">{{ profile.state|default:"—" }}</td>
+            <td class="lb-cell{% if profile.country|length > 10 %} lb-cell-long{% endif %}">{{ profile.country|default:"—" }}</td>
             <td>{% if is_monthly %}{{ profile.monthly_predictions_count }}{% else %}{{ profile.predictions_count }}{% endif %}</td>
             <td>
               {% if is_monthly %}{{ profile.monthly_points }}{% else %}{{ profile.points }}{% endif %}

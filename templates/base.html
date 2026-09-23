@@ -72,17 +72,50 @@
       vertical-align: middle;
       margin-left: 4px;
     }
+    /* table-layout: fixed makes every column's width/max-width an actual
+       cap instead of a hint the browser overrides for nowrap content --
+       required for the ellipsis truncation below to ever kick in. */
+    .leaderboard-table {
+      table-layout: fixed;
+      width: 100%;
+    }
     .leaderboard-table th,
     .leaderboard-table td {
       white-space: nowrap;
     }
     .leaderboard-table th:first-child,
     .leaderboard-table td:first-child {
-      width: 3rem;
+      width: 2.25rem;
     }
     .leaderboard-table th:last-child,
     .leaderboard-table td:last-child {
       width: 5.5rem;
+    }
+    /* Long Player/State/Country values shrink to fit instead of stretching
+       the row past the mobile viewport; an outlier that's still too long
+       even at the smaller size is truncated with an ellipsis. */
+    .leaderboard-table .lb-cell {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .leaderboard-table .lb-cell-long {
+      font-size: 0.75rem;
+    }
+    .leaderboard-table th:nth-child(2),
+    .leaderboard-table td:nth-child(2) {
+      width: 6.5rem;
+    }
+    .leaderboard-table th:nth-child(3),
+    .leaderboard-table td:nth-child(3) {
+      width: 7.25rem;
+    }
+    .leaderboard-table th:nth-child(4),
+    .leaderboard-table td:nth-child(4) {
+      width: 5rem;
+    }
+    .leaderboard-table th:nth-child(5),
+    .leaderboard-table td:nth-child(5) {
+      width: 3.5rem;
     }
     /* Right-align Count/Points so the ones digit stays in a fixed column as
        the number gains digits, instead of shifting left-to-right. Headers
