@@ -8,6 +8,7 @@
           <th scope="col">Player</th>
           <th scope="col">State</th>
           <th scope="col">Country</th>
+          <th scope="col">Count</th>
           <th scope="col">Points</th>
         </tr>
       </thead>
@@ -18,14 +19,25 @@
             <td>{{ profile.user.username }}</td>
             <td>{{ profile.state|default:"—" }}</td>
             <td>{{ profile.country|default:"—" }}</td>
+            <td>{% if is_monthly %}{{ profile.monthly_predictions_count }}{% else %}{{ profile.predictions_count }}{% endif %}</td>
             <td>
               {% if is_monthly %}{{ profile.monthly_points }}{% else %}{{ profile.points }}{% endif %}
-              {% if forloop.counter == 1 %}
-                <img src="{% static 'predictions/medals/gold.svg' %}" alt="Gold medal — first place" class="medal-icon">
-              {% elif forloop.counter == 2 %}
-                <img src="{% static 'predictions/medals/silver.svg' %}" alt="Silver medal — second place" class="medal-icon">
-              {% elif forloop.counter == 3 %}
-                <img src="{% static 'predictions/medals/bronze.svg' %}" alt="Bronze medal — third place" class="medal-icon">
+              {% if is_monthly %}
+                {% if profile.medal == "gold" %}
+                  <img src="{% static 'predictions/medals/gold.svg' %}" alt="Gold medal — first place" class="medal-icon">
+                {% elif profile.medal == "silver" %}
+                  <img src="{% static 'predictions/medals/silver.svg' %}" alt="Silver medal — second place" class="medal-icon">
+                {% elif profile.medal == "bronze" %}
+                  <img src="{% static 'predictions/medals/bronze.svg' %}" alt="Bronze medal — third place" class="medal-icon">
+                {% endif %}
+              {% else %}
+                {% if forloop.counter == 1 %}
+                  <img src="{% static 'predictions/medals/gold.svg' %}" alt="Gold medal — first place" class="medal-icon">
+                {% elif forloop.counter == 2 %}
+                  <img src="{% static 'predictions/medals/silver.svg' %}" alt="Silver medal — second place" class="medal-icon">
+                {% elif forloop.counter == 3 %}
+                  <img src="{% static 'predictions/medals/bronze.svg' %}" alt="Bronze medal — third place" class="medal-icon">
+                {% endif %}
               {% endif %}
             </td>
           </tr>

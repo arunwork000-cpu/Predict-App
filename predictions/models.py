@@ -68,6 +68,16 @@ class Profile(models.Model):
         return f"{self.user.username} ({self.points} pts)"
 
 
+class UserPredictionCount(Profile):
+    """Proxy of Profile for the admin: a read-only "predictions per user"
+    listing (this month / all-time), see UserPredictionCountAdmin."""
+
+    class Meta:
+        proxy = True
+        verbose_name = "User Count"
+        verbose_name_plural = "User Counts"
+
+
 class Sport(models.Model):
     name = models.CharField(max_length=80, unique=True)
 

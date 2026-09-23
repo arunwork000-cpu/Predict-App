@@ -4,7 +4,7 @@ import json
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
-from django.db.models import Q, Sum
+from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncMonth
 from django.http import Http404, HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -283,8 +283,10 @@ def redeem_credits_view(request):
 
 def _all_time_profiles():
     """Total points across all scored predictions, all time."""
-    return Profile.objects.select_related("user").order_by(
-        "-points", "user__username"
+    return (
+        Profile.objects.select_related("user")
+        .annotate(predictions_count=Count("user__predictions"))
+        .order_by("-points", "user__username")
     )
 
 
@@ -329,11 +331,43 @@ def _monthly_profiles(year, month):
     )
     totals = {row["user_id"]: row["total"] for row in rows}
 
+    prediction_rows = (
+        Prediction.objects.filter(created_at__gte=start, created_at__lt=end)
+        .values("user_id")
+        .annotate(total=Count("id"))
+    )
+    prediction_totals = {row["user_id"]: row["total"] for row in prediction_rows}
+
     profiles = list(Profile.objects.select_related("user"))
     for profile in profiles:
         profile.monthly_points = totals.get(profile.user_id, 0)
+        profile.monthly_predictions_count = prediction_totals.get(profile.user_id, 0)
     profiles.sort(key=lambda p: (-p.monthly_points, p.user.username))
     return profiles
+
+
+MEDAL_ELIGIBILITY_START_DAY = 21  # day-of-month the 50-prediction floor kicks in
+MEDAL_MIN_PREDICTIONS = 50
+_MEDALS = ("gold", "silver", "bronze")
+
+
+def _assign_medals_by_rank(profiles):
+    """Top 3 by position get gold/silver/bronze; no eligibility check."""
+    for profile in profiles:
+        profile.medal = None
+    for medal, profile in zip(_MEDALS, profiles):
+        profile.medal = medal
+
+
+def _assign_medals_by_eligibility(profiles, minimum):
+    """Top 3 by position *among those with >= minimum predictions this
+    month* get gold/silver/bronze; a higher-ranked but ineligible player is
+    skipped, not just left medal-less in their slot."""
+    for profile in profiles:
+        profile.medal = None
+    eligible = (p for p in profiles if p.monthly_predictions_count >= minimum)
+    for medal, profile in zip(_MEDALS, eligible):
+        profile.medal = medal
 
 
 def leaderboard(request):
@@ -350,13 +384,21 @@ def leaderboard(request):
     if selected is None or selected > current:
         selected = current
     is_past_month = selected != current
+    zone = timezone.get_default_timezone()
 
     monthly_profiles = _monthly_profiles(*selected)
     if is_past_month:
-        # Only the winners: a zero-point player isn't one.
+        # Only the winners: a zero-point player isn't one. Past months are
+        # already decided, so medals stay purely rank-based here.
         monthly_profiles = [p for p in monthly_profiles if p.monthly_points > 0][:3]
+        _assign_medals_by_rank(monthly_profiles)
+    else:
+        today = timezone.localtime(timezone.now(), zone).day
+        if today >= MEDAL_ELIGIBILITY_START_DAY:
+            _assign_medals_by_eligibility(monthly_profiles, MEDAL_MIN_PREDICTIONS)
+        else:
+            _assign_medals_by_rank(monthly_profiles)
 
-    zone = timezone.get_default_timezone()
     months_with_activity = {
         (m.year, m.month)
         for m in ScoreAdjustment.objects.annotate(

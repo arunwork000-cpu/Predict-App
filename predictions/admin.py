@@ -1,7 +1,10 @@
+import datetime
 import json
 
 from django import forms
 from django.contrib import admin, messages
+from django.db.models import Count, Q
+from django.utils import timezone
 from django.utils.html import format_html
 
 from .models import (
@@ -14,6 +17,7 @@ from .models import (
     ScoreAdjustment,
     Sport,
     Team,
+    UserPredictionCount,
     VoucherRedemption,
 )
 from .services import (
@@ -325,3 +329,87 @@ class CreditLedgerAdmin(admin.ModelAdmin):
 
     def has_change_permission(self, request, obj=None):
         return False
+
+
+def _current_month_range():
+    """[start, end) for the current calendar month in the site's default
+    timezone -- same convention as the monthly leaderboard (views._monthly_profiles)."""
+    zone = timezone.get_default_timezone()
+    now = timezone.localtime(timezone.now(), zone)
+    start = datetime.datetime(now.year, now.month, 1, tzinfo=zone)
+    end = (
+        datetime.datetime(now.year + 1, 1, 1, tzinfo=zone)
+        if now.month == 12
+        else datetime.datetime(now.year, now.month + 1, 1, tzinfo=zone)
+    )
+    return start, end
+
+
+@admin.register(UserPredictionCount)
+class UserPredictionCountAdmin(admin.ModelAdmin):
+    """Read-only: predictions per user, this month and all-time."""
+
+    list_display = ("username", "email", "predictions_this_month", "predictions_all_time")
+    search_fields = ("user__username", "user__email")
+    ordering = ("user__username",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_queryset(self, request):
+        start, end = _current_month_range()
+        return (
+            super().get_queryset(request)
+            .select_related("user")
+            .annotate(
+                predictions_month_count=Count(
+                    "user__predictions",
+                    filter=Q(
+                        user__predictions__created_at__gte=start,
+                        user__predictions__created_at__lt=end,
+                    ),
+                ),
+                predictions_alltime_count=Count("user__predictions"),
+            )
+        )
+
+    @admin.display(description="Username", ordering="user__username")
+    def username(self, obj):
+        return obj.user.username
+
+    @admin.display(description="Email", ordering="user__email")
+    def email(self, obj):
+        return obj.user.email
+
+    @admin.display(description="Predictions (this month)", ordering="predictions_month_count")
+    def predictions_this_month(self, obj):
+        return obj.predictions_month_count
+
+    @admin.display(description="Predictions (all time)", ordering="predictions_alltime_count")
+    def predictions_all_time(self, obj):
+        return obj.predictions_alltime_count
+
+
+# "User Counts" reuses Profile's data as a proxy model, so it lands wherever
+# Django's default alphabetical admin ordering puts it. Voucher redemptions is
+# currently the last entry in this app, so pinning UserPredictionCount to the
+# end (a stable sort -- everything else keeps its existing order) puts it
+# directly below.
+_default_get_app_list = admin.site.get_app_list
+
+
+def _get_app_list_user_counts_last(self, request, app_label=None):
+    app_list = _default_get_app_list(request, app_label)
+    for app in app_list:
+        if app["app_label"] == "predictions":
+            app["models"].sort(key=lambda m: m["object_name"] == "UserPredictionCount")
+    return app_list
+
+
+admin.site.get_app_list = _get_app_list_user_counts_last.__get__(admin.site)
