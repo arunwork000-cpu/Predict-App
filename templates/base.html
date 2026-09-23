@@ -85,9 +85,15 @@
       width: 5.5rem;
     }
     /* Right-align Count/Points so the ones digit stays in a fixed column as
-       the number gains digits, instead of shifting left-to-right. */
+       the number gains digits, instead of shifting left-to-right. Headers
+       are right-aligned to match, so the digits sit under the header text. */
+    .leaderboard-table th:nth-last-child(2),
     .leaderboard-table td:nth-last-child(2) {
       text-align: right;
+    }
+    .leaderboard-table th:last-child {
+      text-align: right;
+      padding-right: 34px; /* matches the reserved medal-icon space below */
     }
     .leaderboard-table td:last-child {
       text-align: right;
