@@ -73,6 +73,10 @@ def sport_matches(request, sport_slug):
     )
     open_matches = [m for m in matches if m.predictions_open]
     _attach_user_picks(request, open_matches)
+    # Already-predicted matches sink below the still-open ones, so after the
+    # full-page reload a submitted prediction causes, the next match to
+    # predict is near the top instead of buried below ones already done.
+    open_matches.sort(key=lambda m: (m.user_pick is not None, m.start_time))
 
     return render(
         request,
