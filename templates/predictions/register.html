@@ -10,6 +10,20 @@
       {# csrf_token is required on every POST form. #}
       {% csrf_token %}
       {% for field in form %}
+        {% if field.name == "accept_terms" %}
+        <div class="mb-3 form-check">
+          <input type="checkbox" class="form-check-input" name="{{ field.html_name }}" id="{{ field.id_for_label }}" required{% if field.value %} checked{% endif %}>
+          <label class="form-check-label" for="{{ field.id_for_label }}">
+            I am 18 or older and agree to the
+            <a href="{% url 'terms' %}" target="_blank" rel="noopener">Terms and Conditions</a>
+            and <a href="{% url 'privacy' %}" target="_blank" rel="noopener">Privacy Policy</a>
+            <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden">(required)</span>
+          </label>
+          {% if field.errors %}
+            <div class="text-danger small">{{ field.errors }}</div>
+          {% endif %}
+        </div>
+        {% else %}
         <div class="mb-3">
           <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}{% if field.field.required %} <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden">(required)</span>{% endif %}</label>
           {{ field }}
@@ -20,6 +34,7 @@
             <div class="text-danger small">{{ field.errors }}</div>
           {% endif %}
         </div>
+        {% endif %}
       {% endfor %}
       <button type="submit" class="btn btn-primary">Register</button>
     </form>

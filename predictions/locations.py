@@ -7,10 +7,10 @@ screens and the leaderboard need no extra lookup to be readable.
 """
 
 STATES_BY_COUNTRY = {
+    # Assam, Andhra Pradesh, Odisha, Nagaland, Sikkim and Telangana are
+    # deliberately left out: residents can't claim prizes (Terms section 1).
     "India": [
-        "Andhra Pradesh",
         "Arunachal Pradesh",
-        "Assam",
         "Bihar",
         "Chhattisgarh",
         "Goa",
@@ -25,13 +25,9 @@ STATES_BY_COUNTRY = {
         "Manipur",
         "Meghalaya",
         "Mizoram",
-        "Nagaland",
-        "Odisha",
         "Punjab",
         "Rajasthan",
-        "Sikkim",
         "Tamil Nadu",
-        "Telangana",
         "Tripura",
         "Uttar Pradesh",
         "Uttarakhand",

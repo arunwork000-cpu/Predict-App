@@ -49,6 +49,14 @@ class RegistrationForm(UserCreationForm):
         help_text="Got a link from a friend? Their code is prefilled; you can also type it in.",
         widget=forms.TextInput(attrs={"placeholder": "e.g. AB3KX9QZ"}),
     )
+    # Not stored: a successful registration implies acceptance. The label
+    # (with links to both pages) is rendered in register.html.
+    accept_terms = forms.BooleanField(
+        label="I am 18 or older and agree to the Terms and Conditions and Privacy Policy",
+        error_messages={
+            "required": "You must accept the Terms and Conditions to register."
+        },
+    )
 
     field_order = [
         "username",
@@ -59,6 +67,7 @@ class RegistrationForm(UserCreationForm):
         "state",
         "age",
         "referral_code",
+        "accept_terms",
     ]
 
     class Meta(UserCreationForm.Meta):

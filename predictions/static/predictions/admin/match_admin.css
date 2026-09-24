@@ -1,0 +1,4 @@
+/* Match admin: make the Winner label stand out. */
+label[for="id_winner"] {
+  font-weight: bold;
+}

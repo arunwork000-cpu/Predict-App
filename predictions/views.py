@@ -465,6 +465,14 @@ def register(request):
     )
 
 
+def terms(request):
+    return render(request, "predictions/terms.html")
+
+
+def privacy(request):
+    return render(request, "predictions/privacy.html")
+
+
 @login_required
 def add_email(request):
     """One-time page asking a logged-in user with no email for one.

@@ -73,6 +73,10 @@ def _int_or_none(value):
         return None
 
 
+# Sports whose admin points fields follow a 100-point split (see match_points.js).
+POINTS_AUTOFILL_SPORTS = ("Tennis", "Badminton")
+
+
 class MatchAdminForm(forms.ModelForm):
     """Match form whose team dropdowns follow the chosen sport.
 
@@ -125,6 +129,22 @@ class MatchAdminForm(forms.ModelForm):
         sport_widget = self.fields["sport"].widget
         sport_widget = getattr(sport_widget, "widget", sport_widget)
         sport_widget.attrs["data-teams"] = json.dumps(by_sport)
+        # Sports whose points fields are filled from Team A win points by
+        # static/predictions/admin/match_points.js.
+        sport_widget.attrs["data-autofill-points-sports"] = json.dumps(
+            list(
+                Sport.objects.filter(name__in=POINTS_AUTOFILL_SPORTS).values_list(
+                    "id", flat=True
+                )
+            )
+        )
+
+        # Django derives "Team a ..." from the field names; capitalise A/B.
+        for name, field in self.fields.items():
+            if name.startswith(("team_a", "team_b")):
+                field.label = field.label.replace("Team a", "Team A").replace(
+                    "Team b", "Team B"
+                )
 
 
 @admin.register(Match)
@@ -136,7 +156,9 @@ class MatchAdmin(admin.ModelAdmin):
             "predictions/admin/match_teams.js",
             "predictions/admin/match_deadline.js",
             "predictions/admin/match_tomorrow.js",
+            "predictions/admin/match_points.js",
         )
+        css = {"all": ("predictions/admin/match_admin.css",)}
 
     list_display = (
         "team_a",
@@ -190,7 +212,9 @@ class MatchAdmin(admin.ModelAdmin):
                 "Points awarded for a correct/incorrect pick. Defaults: win 10, lose -5. "
                 "The Draw points apply only to Football, Cricket and Hockey. "
                 "Enter 0 in both Draw fields if the match cannot end in a draw: "
-                "the Draw box is then hidden and users pick only Team A or Team B."
+                "the Draw box is then hidden and users pick only Team A or Team B. "
+                "For Tennis and Badminton, entering Team A win points fills the other "
+                "fields (100-point split); all stay editable."
             ),
         }),
     )
@@ -199,6 +223,12 @@ class MatchAdmin(admin.ModelAdmin):
         # Past-deadline Scheduled matches show as Awaiting result here too.
         sync_match_statuses()
         return super().get_queryset(request)
+
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+        # New matches start published; the admin can still untick it.
+        initial.setdefault("is_published", True)
+        return initial
 
     @admin.action(description="Publish selected matches")
     def publish_matches(self, request, queryset):

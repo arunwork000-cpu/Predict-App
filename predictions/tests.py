@@ -510,6 +510,7 @@ def registration_data(**overrides):
         "country": "India",
         "state": "Kerala",
         "age": "30",
+        "accept_terms": "on",
     }
     data.update(overrides)
     data.setdefault("email", f"{data['username']}@example.com")
@@ -588,6 +589,41 @@ class AccountTests(TestCase):
         self.assertEqual(response.status_code, 405)
 
 
+class TermsAndPrivacyTests(TestCase):
+    def test_terms_page_renders(self):
+        response = self.client.get(reverse("terms"))
+        self.assertContains(response, "Terms and Conditions")
+        self.assertContains(response, "Welcome to winsports.cc")
+        self.assertContains(response, "Last Updated: September 24, 2026")
+        self.assertContains(response, 'href="%s"' % reverse("privacy"))
+
+    def test_privacy_page_renders(self):
+        response = self.client.get(reverse("privacy"))
+        self.assertContains(response, "Privacy Policy")
+        self.assertContains(response, "mailto:winsportsapp@gmail.com")
+        self.assertContains(response, 'href="%s"' % reverse("terms"))
+
+    def test_footer_links_on_every_page(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, 'href="%s"' % reverse("terms"))
+        self.assertContains(response, 'href="%s"' % reverse("privacy"))
+
+    def test_register_page_shows_required_terms_checkbox(self):
+        response = self.client.get(reverse("register"))
+        self.assertContains(response, 'name="accept_terms"')
+        self.assertContains(response, "I am 18 or older and agree to the")
+
+    def test_register_without_accepting_terms_is_rejected(self):
+        data = registration_data()
+        del data["accept_terms"]
+        response = self.client.post(reverse("register"), data)
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(
+            response, "You must accept the Terms and Conditions to register."
+        )
+        self.assertFalse(User.objects.filter(username="newuser").exists())
+
+
 class RegistrationLocationTests(TestCase):
     """Country/State are required, dropdown-only, and cross-validated."""
 
@@ -595,6 +631,23 @@ class RegistrationLocationTests(TestCase):
         response = self.client.get(reverse("register"))
         self.assertContains(response, '<select name="country"')
         self.assertContains(response, '<select name="state"')
+
+    def test_restricted_indian_states_are_not_offered(self):
+        response = self.client.get(reverse("register"))
+        for index, state in enumerate(
+            ("Assam", "Andhra Pradesh", "Odisha", "Nagaland", "Sikkim", "Telangana")
+        ):
+            with self.subTest(state=state):
+                self.assertNotContains(response, f'<option value="{state}">')
+                rejected = self.client.post(
+                    reverse("register"),
+                    registration_data(username=f"blocked{index}", state=state),
+                )
+                self.assertEqual(rejected.status_code, 200)
+                self.assertIn("state", rejected.context["form"].errors)
+                self.assertFalse(
+                    User.objects.filter(username=f"blocked{index}").exists()
+                )
 
     def test_missing_country_is_rejected(self):
         response = self.client.post(reverse("register"), registration_data(country=""))
@@ -2435,6 +2488,50 @@ class MatchAdminActionTests(TestCase):
         )
         self.match.refresh_from_db()
         self.assertFalse(self.match.is_published)
+
+    def test_add_form_ticks_is_published_by_default(self):
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        self.assertIs(response.context["adminform"].form.initial["is_published"], True)
+        tag = re.search(r'<input[^>]*name="is_published"[^>]*>', response.content.decode())
+        self.assertIn(" checked", tag.group(0))
+
+    def test_change_form_keeps_saved_unpublished_value(self):
+        response = self.client.get(
+            reverse("admin:predictions_match_change", args=[self.match.pk])
+        )
+        self.assertFalse(response.context["adminform"].form.initial["is_published"])
+        tag = re.search(r'<input[^>]*name="is_published"[^>]*>', response.content.decode())
+        self.assertNotIn(" checked", tag.group(0))
+
+    def test_add_form_uses_capital_team_a_and_b_labels(self):
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        for label in (
+            ">Team A:</label>",
+            ">Team B:</label>",
+            ">Team A win points:</label>",
+            ">Team A lose points:</label>",
+            ">Team B win points:</label>",
+            ">Team B lose points:</label>",
+        ):
+            self.assertContains(response, label)
+        self.assertNotContains(response, "Team a")
+        self.assertNotContains(response, "Team b")
+
+    def test_add_form_loads_winner_style_and_points_autofill(self):
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        self.assertContains(response, "predictions/admin/match_admin.css")
+        self.assertContains(response, "predictions/admin/match_points.js")
+
+    def test_points_autofill_applies_only_to_tennis_and_badminton(self):
+        tennis, _ = Sport.objects.get_or_create(name="Tennis")
+        badminton, _ = Sport.objects.get_or_create(name="Badminton")
+        football, _ = Sport.objects.get_or_create(name="Football")
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        widget = response.context["adminform"].form.fields["sport"].widget
+        widget = getattr(widget, "widget", widget)
+        ids = json.loads(widget.attrs["data-autofill-points-sports"])
+        self.assertCountEqual(ids, [tennis.pk, badminton.pk])
+        self.assertNotIn(football.pk, ids)
 
     def test_add_form_exposes_all_four_points_fields(self):
         response = self.client.get(reverse("admin:predictions_match_add"))
