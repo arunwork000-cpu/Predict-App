@@ -3,12 +3,14 @@ player names, so imported names match the Team rows entered by hand.
 
 https://rapidapi.com/tipsters/api/flashlive-sports
 
-Quota: the free RapidAPI plan allows only a small number of requests a month,
-so fixtures are fetched only for the tournaments listed in
-FLASHLIVE_TOURNAMENTS, and results only for matches awaiting one.
+Quota: the free RapidAPI plan allows only a small number of requests a month.
+One request returns a whole day of one sport, so which matches are imported
+(FLASHLIVE_TOURNAMENTS / FLASHLIVE_TEAMS / FLASHLIVE_EXCLUDE_TOURNAMENTS) does
+not change the number of requests.
 """
 
 import logging
+from fnmatch import fnmatchcase
 from datetime import datetime, timezone as dt_timezone
 
 import requests
@@ -43,17 +45,34 @@ CALLED_OFF_STAGES = {"POSTPONED", "CANCELED", "CANCELLED", "ABANDONED"}
 class FlashLiveProvider(Provider):
     name = "flashlive"
 
-    def __init__(self, api_key=None, tournaments=None, sport_ids=None, session=None):
+    def __init__(
+        self,
+        api_key=None,
+        tournaments=None,
+        sport_ids=None,
+        session=None,
+        teams=None,
+        exclude_tournaments=None,
+    ):
         self.api_key = api_key if api_key is not None else settings.RAPIDAPI_KEY
-        self.tournaments = {
-            str(t).strip().lower()
-            for t in (
-                tournaments
-                if tournaments is not None
-                else settings.FLASHLIVE_TOURNAMENTS
-            )
-            if str(t).strip()
-        }
+        # Tournament names or IDs; "*" wildcards allowed, e.g. "* ATP*".
+        self.tournaments = _patterns(
+            tournaments if tournaments is not None else settings.FLASHLIVE_TOURNAMENTS
+        )
+        self.exclude_tournaments = _patterns(
+            exclude_tournaments
+            if exclude_tournaments is not None
+            else settings.FLASHLIVE_EXCLUDE_TOURNAMENTS
+        )
+        # "Sport:Team" entries: import any match of that team, whatever the
+        # tournament (e.g. every "Cricket:India" international).
+        self.teams = {}
+        for entry in teams if teams is not None else settings.FLASHLIVE_TEAMS:
+            sport, sep, team = str(entry).partition(":")
+            if sep and team.strip():
+                self.teams.setdefault(sport.strip().lower(), set()).add(
+                    team.strip().lower()
+                )
         self.sport_ids = {
             **DEFAULT_SPORT_IDS,
             **{
@@ -78,7 +97,8 @@ class FlashLiveProvider(Provider):
         return sport_name in self.sport_ids
 
     def fetch_fixtures(self, sport_name, days_ahead, new_day_only=False):
-        if not self.tournaments:
+        teams = self.teams.get(sport_name.lower(), set())
+        if not (self.tournaments or teams):
             # Without a filter this would import every match in the world.
             return []
         last_day = min(days_ahead, MAX_INDENT_DAYS)
@@ -88,9 +108,13 @@ class FlashLiveProvider(Provider):
         events = []
         for day in days:
             for group in self._list_events(sport_name, day):
-                if not self._tournament_wanted(group):
+                keys = _tournament_keys(group)
+                if _matches_any(keys, self.exclude_tournaments):
                     continue
+                whole_tournament = _matches_any(keys, self.tournaments)
                 for raw in group.get("EVENTS") or []:
+                    if not whole_tournament and not _plays(raw, teams):
+                        continue
                     event = self._to_event(sport_name, group, raw)
                     if event:
                         events.append(event)
@@ -165,20 +189,6 @@ class FlashLiveProvider(Provider):
             },
         )
 
-    def _tournament_wanted(self, group):
-        # Matches an ID, the full name ("ENGLAND: Premier League", the precise
-        # choice) or the short name ("Premier League", which may also match
-        # a same-named league in another country).
-        keys = (
-            group.get("TOURNAMENT_TEMPLATE_ID"),
-            group.get("TOURNAMENT_STAGE_ID"),
-            group.get("TOURNAMENT_ID"),
-            group.get("NAME"),
-            group.get("SHORT_NAME"),
-            _event_name(group),
-        )
-        return any(str(k).strip().lower() in self.tournaments for k in keys if k)
-
     def _to_event(self, sport_name, group, raw):
         event_id = raw.get("EVENT_ID")
         home, away = raw.get("HOME_NAME"), raw.get("AWAY_NAME")
@@ -206,6 +216,38 @@ class FlashLiveProvider(Provider):
             home_image=_first(raw.get("HOME_IMAGES")),
             away_image=_first(raw.get("AWAY_IMAGES")),
         )
+
+
+def _patterns(values):
+    return {str(v).strip().lower() for v in values if str(v).strip()}
+
+
+def _tournament_keys(group):
+    """The names/IDs a tournament can be listed by: an ID, the full name
+    ("England: Premier League", the precise choice) or the short name
+    ("Premier League", which may also match another country's league)."""
+    keys = (
+        group.get("TOURNAMENT_TEMPLATE_ID"),
+        group.get("TOURNAMENT_STAGE_ID"),
+        group.get("TOURNAMENT_ID"),
+        group.get("NAME"),
+        group.get("SHORT_NAME"),
+        _event_name(group),
+    )
+    return [str(k).strip().lower() for k in keys if k]
+
+
+def _matches_any(keys, patterns):
+    """True if any key equals a pattern, or fits one with "*" wildcards."""
+    return any(fnmatchcase(key, pattern) for key in keys for pattern in patterns)
+
+
+def _plays(raw, teams):
+    """True if one of `teams` (lower-case names) plays in this event."""
+    return bool(teams) and any(
+        str(raw.get(side) or "").strip().lower() in teams
+        for side in ("HOME_NAME", "AWAY_NAME")
+    )
 
 
 def _event_name(group):

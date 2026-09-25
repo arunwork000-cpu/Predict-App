@@ -252,8 +252,14 @@ DEFAULT_FROM_EMAIL = env(
 # fail with an invalid-header error, so strip them.
 RAPIDAPI_KEY = env('RAPIDAPI_KEY', default='').strip().strip('"\'').strip()
 # Tournaments to import fixtures from: FlashLive tournament IDs or names,
-# comma-separated. Empty = no fixtures are imported (results still sync).
+# comma-separated, "*" wildcards allowed (e.g. "* ATP*" = every ATP event).
 FLASHLIVE_TOURNAMENTS = env.list('FLASHLIVE_TOURNAMENTS', default=[])
+# Also import every match of these teams, whatever the tournament, as
+# "Sport:Team" (e.g. "Cricket:India" for all India internationals).
+FLASHLIVE_TEAMS = env.list('FLASHLIVE_TEAMS', default=[])
+# Never import from tournaments matching these (wildcards allowed), e.g.
+# "*Doubles*,*Test*". Checked before the two lists above.
+FLASHLIVE_EXCLUDE_TOURNAMENTS = env.list('FLASHLIVE_EXCLUDE_TOURNAMENTS', default=[])
 # Overrides/additions for our sport name -> FlashLive sport_id. Hockey is not
 # imported by default (entered by hand); "Hockey=24" would add field hockey.
 FLASHLIVE_SPORT_IDS = env.dict('FLASHLIVE_SPORT_IDS', default={})

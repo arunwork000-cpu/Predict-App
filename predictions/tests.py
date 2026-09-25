@@ -4330,11 +4330,14 @@ def flashlive_event(event_id="fl1", **kwargs):
 
 
 class FlashLiveProviderTests(SimpleTestCase):
-    def _provider(self, responses, tournaments=("Premier League",)):
+    def _provider(self, responses, tournaments=("Premier League",), **kwargs):
         session = mock.Mock()
         session.get.side_effect = responses
+        kwargs.setdefault("teams", ())
+        kwargs.setdefault("exclude_tournaments", ())
         provider = FlashLiveProvider(
-            api_key="key", tournaments=tournaments, sport_ids={}, session=session
+            api_key="key", tournaments=tournaments, sport_ids={}, session=session,
+            **kwargs,
         )
         return provider, session
 
@@ -4359,8 +4362,51 @@ class FlashLiveProviderTests(SimpleTestCase):
         self.assertIsNone(event.result)
         self.assertEqual(session.get.call_args_list[0].kwargs["params"]["sport_id"], 1)
 
+    def test_wildcards_pick_all_atp_and_wta_singles(self):
+        provider, _ = self._provider(
+            [flashlive_response([
+                flashlive_group([flashlive_event("atp")], name="China: Chengdu ATP, hard"),
+                flashlive_group([flashlive_event("wta")], name="USA: US Open WTA, hard"),
+                flashlive_group(
+                    [flashlive_event("dbl")], name="China: Chengdu ATP Doubles, hard"
+                ),
+                flashlive_group(
+                    [flashlive_event("chall")], name="Italy: Genova 2 Chall. Men, clay"
+                ),
+            ])],
+            tournaments=("* ATP*", "* WTA*"),
+            exclude_tournaments=("*Doubles*",),
+        )
+        events = provider.fetch_fixtures("Tennis", 0)
+        self.assertEqual([e.external_id for e in events], ["atp", "wta"])
+
+    def test_team_list_picks_matches_in_any_tournament_except_excluded(self):
+        provider, _ = self._provider(
+            [flashlive_response([
+                flashlive_group(
+                    [
+                        flashlive_event("odi", HOME_NAME="India", AWAY_NAME="Australia"),
+                        flashlive_event("other", HOME_NAME="Nepal", AWAY_NAME="Oman"),
+                        flashlive_event("women", HOME_NAME="India W", AWAY_NAME="Oman W"),
+                    ],
+                    name="World: ODI Series",
+                ),
+                flashlive_group(
+                    [flashlive_event("test", HOME_NAME="India", AWAY_NAME="England")],
+                    name="World: Test Series",
+                ),
+            ])],
+            tournaments=(),
+            teams=("Cricket:India", "Cricket:Australia", "Football:Nepal"),
+            exclude_tournaments=("*Test*",),
+        )
+        events = provider.fetch_fixtures("Cricket", 0)
+        self.assertEqual([e.external_id for e in events], ["odi"])
+
     def test_no_tournaments_configured_imports_nothing(self):
-        provider, session = self._provider([], tournaments=())
+        provider, session = self._provider(
+            [], tournaments=(), teams=("Cricket:India",)
+        )
         self.assertEqual(provider.fetch_fixtures("Football", 7), [])
         session.get.assert_not_called()
 
