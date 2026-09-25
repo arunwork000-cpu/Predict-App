@@ -22,14 +22,14 @@ API_HOST = "flashlive-sports.p.rapidapi.com"
 BASE_URL = f"https://{API_HOST}/v1"
 LOCALE = "en_INT"
 
-# Our Sport.name -> FlashLive sport_id. Override (or add Badminton etc.) with
-# FLASHLIVE_SPORT_IDS; check the IDs with
+# Our Sport.name -> FlashLive sport_id. Only these sports are imported, and
+# each one costs API quota on every run. Hockey (field hockey) is left out
+# on purpose: it is entered by hand. Add a sport with FLASHLIVE_SPORT_IDS
+# (field hockey is 24); check the IDs with
 # `python manage.py sync_external_matches --list-sports`.
-# FlashLive's "Hockey" (4) is ice hockey; field hockey is 24.
 DEFAULT_SPORT_IDS = {
     "Football": 1,
     "Tennis": 2,
-    "Hockey": 4,
     "Cricket": 13,
     "Badminton": 21,
 }

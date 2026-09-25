@@ -4464,6 +4464,13 @@ class FlashLiveProviderTests(SimpleTestCase):
         self.assertEqual(provider.sport_ids["Hockey"], 24)
         self.assertFalse(provider.supports("Curling"))
 
+    def test_hockey_is_not_imported_by_default(self):
+        # Field hockey is entered by hand, so it must cost no API requests.
+        provider = FlashLiveProvider(
+            api_key="k", tournaments=(), sport_ids={}, session=mock.Mock()
+        )
+        self.assertFalse(provider.supports("Hockey"))
+
 
 class SyncExternalMatchesCommandTests(TestCase):
     COMMAND_MODULE = "predictions.management.commands.sync_external_matches"

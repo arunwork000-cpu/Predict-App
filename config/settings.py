@@ -254,7 +254,8 @@ RAPIDAPI_KEY = env('RAPIDAPI_KEY', default='').strip().strip('"\'').strip()
 # Tournaments to import fixtures from: FlashLive tournament IDs or names,
 # comma-separated. Empty = no fixtures are imported (results still sync).
 FLASHLIVE_TOURNAMENTS = env.list('FLASHLIVE_TOURNAMENTS', default=[])
-# Overrides for our sport name -> FlashLive sport_id, e.g. "Hockey=24".
+# Overrides/additions for our sport name -> FlashLive sport_id. Hockey is not
+# imported by default (entered by hand); "Hockey=24" would add field hockey.
 FLASHLIVE_SPORT_IDS = env.dict('FLASHLIVE_SPORT_IDS', default={})
 
 
