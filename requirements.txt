@@ -6,3 +6,4 @@ gunicorn==23.0.0
 Pillow==12.3.0
 tzdata==2026.3
 django-anymail[resend]==15.2
+requests==2.34.2

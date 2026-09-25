@@ -1,8 +1,14 @@
+import os
+from datetime import timedelta
+
+from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
 from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import F
 from django.template.loader import render_to_string
 from django.utils import timezone
+from django.utils.text import slugify
 
 from .models import (
     CreditLedger,
@@ -12,6 +18,8 @@ from .models import (
     Referral,
     ReferralSettings,
     ScoreAdjustment,
+    Team,
+    TeamAlias,
     VoucherRedemption,
 )
 
@@ -121,6 +129,187 @@ def score_match(match_id):
             changed = True
 
         return changed
+
+
+def _resolve_team(provider, sport, name, image_url, summary, download_images):
+    """The Team called `name` in `sport`, creating it if it doesn't exist.
+
+    Team names are entered exactly as Flashscore spells them, so an exact
+    match is the norm; TeamAlias covers the odd name that differs.
+    """
+    name = name[:100]
+    team = (
+        Team.objects.filter(sport=sport, name=name).first()
+        or Team.objects.filter(sport=sport, name__iexact=name).first()
+    )
+    if team:
+        return team
+    alias = (
+        TeamAlias.objects.filter(
+            source=provider.name, external_name=name, team__sport=sport
+        )
+        .select_related("team")
+        .first()
+    )
+    if alias:
+        return alias.team
+
+    team = Team.objects.create(name=name, sport=sport)
+    summary["new_teams"].append(f"{sport.name}: {name}")
+    if download_images and image_url:
+        data = provider.fetch_image(image_url)
+        if data:
+            extension = os.path.splitext(image_url.split("?")[0])[1].lower()
+            if extension not in (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg"):
+                extension = ".png"
+            team.flag.save(
+                f"{slugify(name) or 'team'}{extension}", ContentFile(data), save=True
+            )
+    return team
+
+
+def import_fixtures(
+    provider, sport, days_ahead=7, download_images=True, new_day_only=False
+):
+    """Create (unpublished) matches for `sport`'s upcoming fixtures from
+    `provider`, and follow kickoff-time changes of matches already imported.
+
+    Idempotent: matches are keyed on (external_source, external_id). New
+    matches start unpublished, so an admin reviews them and publishes with
+    the "Publish selected matches" action. Returns a summary dict.
+    """
+    summary = {"created": 0, "updated": 0, "skipped": 0, "new_teams": [], "called_off": []}
+    now = timezone.now()
+
+    for event in provider.fetch_fixtures(
+        sport.name, days_ahead, new_day_only=new_day_only
+    ):
+        match = Match.objects.filter(
+            external_source=event.source, external_id=event.external_id
+        ).first()
+
+        if match is None:
+            if event.called_off or event.result or event.start_time <= now:
+                summary["skipped"] += 1
+                continue
+            team_a = _resolve_team(
+                provider, sport, event.home, event.home_image, summary, download_images
+            )
+            team_b = _resolve_team(
+                provider, sport, event.away, event.away_image, summary, download_images
+            )
+            if team_a == team_b:
+                summary["skipped"] += 1
+                continue
+            Match.objects.create(
+                sport=sport,
+                event_name=event.event_name,
+                team_a=team_a,
+                team_b=team_b,
+                start_time=event.start_time,
+                prediction_deadline=event.start_time,
+                is_published=False,
+                external_source=event.source,
+                external_id=event.external_id,
+            )
+            summary["created"] += 1
+            continue
+
+        if event.called_off:
+            summary["called_off"].append(str(match))
+        elif (
+            match.status == Match.Status.SCHEDULED
+            and not match.has_result
+            and match.start_time != event.start_time
+        ):
+            # Kickoff moved: keep the admin's deadline offset from kickoff.
+            offset = match.start_time - match.prediction_deadline
+            match.start_time = event.start_time
+            match.prediction_deadline = event.start_time - offset
+            match.save(update_fields=["start_time", "prediction_deadline"])
+            summary["updated"] += 1
+
+    return summary
+
+
+# Imported matches are only looked up for this long after kickoff; after
+# that the admin enters the result by hand. Stops a match the source never
+# settles (e.g. a cricket result with no winner) using API quota every run.
+RESULT_LOOKUP_DAYS = 3
+
+
+def sync_results(provider, sport):
+    """Store `provider`'s final results as *suggested* results on imported
+    `sport` matches awaiting one.
+
+    Never sets winner/is_draw and never scores: an admin confirms each
+    suggestion (confirm_suggested_result). Returns a summary dict.
+    """
+    sync_match_statuses()
+    summary = {"suggested": 0, "called_off": [], "enter_by_hand": []}
+    cutoff = timezone.now() - timedelta(days=RESULT_LOOKUP_DAYS)
+    pending = {}
+    for match in (
+        Match.objects.filter(
+            sport=sport,
+            external_source=provider.name,
+            status=Match.Status.AWAITING_RESULT,
+            winner__isnull=True,
+            is_draw=False,
+            suggested_at__isnull=True,
+        )
+        .exclude(external_id="")
+        .select_related("team_a", "team_b")
+    ):
+        if match.start_time < cutoff:
+            summary["enter_by_hand"].append(str(match))
+        else:
+            pending[match.external_id] = match
+    if not pending:
+        return summary
+
+    kickoffs = {external_id: m.start_time for external_id, m in pending.items()}
+    for external_id, event in provider.fetch_results(sport.name, kickoffs).items():
+        match = pending.get(external_id)
+        if match is None:
+            continue
+        if event.called_off:
+            summary["called_off"].append(str(match))
+            continue
+        if event.result is None:
+            continue
+        match.suggested_winner = {"home": match.team_a, "away": match.team_b}.get(
+            event.result
+        )
+        match.suggested_is_draw = event.result == "draw"
+        match.suggested_at = timezone.now()
+        match.save(
+            update_fields=["suggested_winner", "suggested_is_draw", "suggested_at"]
+        )
+        summary["suggested"] += 1
+
+    return summary
+
+
+def confirm_suggested_result(match):
+    """Make `match`'s suggested result its real result and score it.
+
+    Raises ValidationError if there is no suggestion, the match already has
+    a result, or the suggestion is invalid (e.g. a draw on a match that
+    can't be drawn -- the same checks as entering a result by hand).
+    """
+    if not match.has_suggested_result:
+        raise ValidationError("There is no suggested result to confirm.")
+    if match.has_result or match.status not in (
+        Match.Status.SCHEDULED,
+        Match.Status.AWAITING_RESULT,
+    ):
+        raise ValidationError("This match already has a result or is cancelled.")
+    match.winner = match.suggested_winner
+    match.is_draw = match.suggested_is_draw
+    match.full_clean()
+    match.save()  # moves the match to Finished
+    score_match(match.pk)
 
 
 def apply_referral_code(referred_user, code):

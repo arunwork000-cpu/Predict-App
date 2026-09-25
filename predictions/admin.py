@@ -3,6 +3,7 @@ import json
 
 from django import forms
 from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
 from django.utils import timezone
 from django.utils.html import format_html
@@ -17,10 +18,12 @@ from .models import (
     ScoreAdjustment,
     Sport,
     Team,
+    TeamAlias,
     UserPredictionCount,
     VoucherRedemption,
 )
 from .services import (
+    confirm_suggested_result,
     fulfill_redemption,
     reject_redemption,
     score_match,
@@ -52,6 +55,14 @@ class TeamAdmin(admin.ModelAdmin):
             obj.flag.url,
             obj.name,
         )
+
+
+@admin.register(TeamAlias)
+class TeamAliasAdmin(admin.ModelAdmin):
+    list_display = ("external_name", "source", "team")
+    list_filter = ("source",)
+    search_fields = ("external_name", "team__name")
+    autocomplete_fields = ("team",)
 
 
 @admin.register(Profile)
@@ -147,6 +158,23 @@ class MatchAdminForm(forms.ModelForm):
                 )
 
 
+class SuggestedResultFilter(admin.SimpleListFilter):
+    title = "suggested result"
+    parameter_name = "suggested"
+
+    def lookups(self, request, model_admin):
+        return (("pending", "Awaiting confirmation"),)
+
+    def queryset(self, request, queryset):
+        if self.value() == "pending":
+            return queryset.filter(
+                Q(suggested_winner__isnull=False) | Q(suggested_is_draw=True),
+                winner__isnull=True,
+                is_draw=False,
+            )
+        return queryset
+
+
 @admin.register(Match)
 class MatchAdmin(admin.ModelAdmin):
     form = MatchAdminForm
@@ -170,19 +198,33 @@ class MatchAdmin(admin.ModelAdmin):
         "prediction_deadline",
         "winner",
         "is_draw",
+        "suggested_result",
         "is_published",
         "is_scored",
     )
-    list_filter = ("sport", "status", "is_draw", "is_published", "is_scored")
+    list_filter = (
+        "sport",
+        "status",
+        SuggestedResultFilter,
+        "is_draw",
+        "is_published",
+        "is_scored",
+    )
     search_fields = ("team_a__name", "team_b__name", "event_name")
     # sport/team_a/team_b/winner are plain dropdowns (not autocomplete) so
     # they can be filtered by sport; see MatchAdminForm.
     date_hierarchy = "start_time"
-    actions = ("publish_matches", "unpublish_matches")
+    actions = ("publish_matches", "unpublish_matches", "confirm_suggested_results")
     # is_scored is managed by the scoring service. winner stays editable even
     # after scoring so a mistaken result can be corrected (score_match then
     # reconciles the points).
-    readonly_fields = ("is_scored",)
+    readonly_fields = (
+        "is_scored",
+        "suggested_result",
+        "external_source",
+        "external_id",
+        "suggested_at",
+    )
     fieldsets = (
         (None, {
             "fields": (
@@ -195,9 +237,14 @@ class MatchAdmin(admin.ModelAdmin):
                 "status",
                 "winner",
                 "is_draw",
+                "suggested_result",
                 "is_published",
                 "is_scored",
             ),
+        }),
+        ("Imported from", {
+            "fields": ("external_source", "external_id", "suggested_at"),
+            "classes": ("collapse",),
         }),
         ("Points", {
             "fields": (
@@ -239,6 +286,33 @@ class MatchAdmin(admin.ModelAdmin):
     def unpublish_matches(self, request, queryset):
         updated = queryset.update(is_published=False)
         self.message_user(request, f"{updated} match(es) unpublished.", messages.SUCCESS)
+
+    @admin.display(description="Suggested result")
+    def suggested_result(self, obj):
+        """The result reported by the import (see sync_external_matches),
+        waiting for an admin to confirm it or enter a different one."""
+        if obj.suggested_is_draw:
+            return "Draw"
+        return str(obj.suggested_winner) if obj.suggested_winner_id else "-"
+
+    @admin.action(description="Confirm suggested results (scores predictions)")
+    def confirm_suggested_results(self, request, queryset):
+        confirmed, failed = 0, []
+        for match in queryset.select_related("sport", "suggested_winner"):
+            try:
+                confirm_suggested_result(match)
+            except ValidationError as exc:
+                failed.append(f"{match}: {' '.join(exc.messages)}")
+            else:
+                confirmed += 1
+        if confirmed:
+            self.message_user(
+                request,
+                f"{confirmed} result(s) confirmed and predictions scored.",
+                messages.SUCCESS,
+            )
+        for error in failed:
+            self.message_user(request, error, messages.ERROR)
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)

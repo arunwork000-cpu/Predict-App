@@ -244,6 +244,20 @@ DEFAULT_FROM_EMAIL = env(
 )
 
 
+# Match import (predictions/importers, `manage.py sync_external_matches`)
+
+# RapidAPI key for the FlashLive Sports API (Flashscore data). Unset = the
+# import is disabled.
+# Stray spaces/quotes (e.g. `RAPIDAPI_KEY= "abc"`) would make every request
+# fail with an invalid-header error, so strip them.
+RAPIDAPI_KEY = env('RAPIDAPI_KEY', default='').strip().strip('"\'').strip()
+# Tournaments to import fixtures from: FlashLive tournament IDs or names,
+# comma-separated. Empty = no fixtures are imported (results still sync).
+FLASHLIVE_TOURNAMENTS = env.list('FLASHLIVE_TOURNAMENTS', default=[])
+# Overrides for our sport name -> FlashLive sport_id, e.g. "Hockey=24".
+FLASHLIVE_SPORT_IDS = env.dict('FLASHLIVE_SPORT_IDS', default={})
+
+
 # Logging
 # https://docs.djangoproject.com/en/6.1/topics/logging/
 

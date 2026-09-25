@@ -6,6 +6,7 @@ import shutil
 import tempfile
 import uuid
 from datetime import timedelta
+from io import StringIO
 from pathlib import Path
 from unittest import mock
 
@@ -13,6 +14,7 @@ from django.contrib.admin.sites import AdminSite
 from django.contrib.auth.models import User
 from django.contrib.messages.storage.fallback import FallbackStorage
 from django.core import mail
+from django.core.management import CommandError, call_command
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError
@@ -34,15 +36,21 @@ from .models import (
     ScoreAdjustment,
     Sport,
     Team,
+    TeamAlias,
     VoucherRedemption,
 )
+from .importers.base import ExternalEvent, Provider, ProviderError
+from .importers.flashlive import FlashLiveProvider
 from .services import (
     POINTS_CORRECT,
     POINTS_WRONG,
+    confirm_suggested_result,
     fulfill_redemption,
+    import_fixtures,
     redeem_credits,
     reject_redemption,
     score_match,
+    sync_results,
 )
 from .templatetags.prediction_extras import signed_points, team_flag
 
@@ -3997,3 +4005,521 @@ class MyAccountPageTests(TestCase):
         response = self.client.get(reverse("my_account"))
         self.assertEqual(response.context["monthly_points"], 15)
         self.assertEqual(response.context["monthly_rank"], 2)
+
+
+class FakeProvider(Provider):
+    """In-memory Provider for the import tests: no network."""
+
+    name = "fake"
+
+    def __init__(self, fixtures=(), results=None):
+        self.fixtures = list(fixtures)
+        self.results = results or {}
+        self.image_requests = []
+
+    def supports(self, sport_name):
+        return True
+
+    def fetch_fixtures(self, sport_name, days_ahead, new_day_only=False):
+        self.new_day_only = new_day_only
+        return [e for e in self.fixtures if e.sport == sport_name]
+
+    def fetch_results(self, sport_name, kickoffs):
+        self.requested_kickoffs = dict(kickoffs)
+        return {i: self.results[i] for i in kickoffs if i in self.results}
+
+    def fetch_image(self, url):
+        self.image_requests.append(url)
+        return TINY_PNG
+
+
+def external_event(external_id="e1", home="Arsenal", away="Chelsea", **kwargs):
+    defaults = {
+        "source": "fake",
+        "external_id": external_id,
+        "sport": "Football",
+        "event_name": "Premier League",
+        "home": home,
+        "away": away,
+        "start_time": timezone.now() + timedelta(days=2),
+    }
+    defaults.update(kwargs)
+    return ExternalEvent(**defaults)
+
+
+def awaiting_external_match(
+    sport_name="Football", external_id="e1", home="Arsenal", away="Chelsea", **kwargs
+):
+    past = timezone.now() - timedelta(hours=3)
+    fields = {
+        "start_time": past,
+        "prediction_deadline": past,
+        "status": Match.Status.AWAITING_RESULT,
+        "external_source": "fake",
+        "external_id": external_id,
+    }
+    fields.update(kwargs)
+    return sport_match(sport_name, home, away, **fields)
+
+
+class ImportFixturesTests(TestCase):
+    def setUp(self):
+        self.football = Sport.objects.get(name="Football")
+
+    def test_creates_unpublished_match_reusing_existing_teams(self):
+        arsenal = Team.objects.create(name="Arsenal", sport=self.football)
+        chelsea = Team.objects.create(name="Chelsea", sport=self.football)
+        event = external_event()
+
+        summary = import_fixtures(FakeProvider([event]), self.football)
+
+        self.assertEqual(summary["created"], 1)
+        self.assertEqual(summary["new_teams"], [])
+        match = Match.objects.get(external_source="fake", external_id="e1")
+        self.assertEqual((match.team_a, match.team_b), (arsenal, chelsea))
+        self.assertFalse(match.is_published)
+        self.assertEqual(match.event_name, "Premier League")
+        self.assertEqual(match.start_time, event.start_time)
+        self.assertEqual(match.prediction_deadline, event.start_time)
+
+    def test_importing_twice_does_not_duplicate(self):
+        provider = FakeProvider([external_event()])
+        import_fixtures(provider, self.football)
+        summary = import_fixtures(provider, self.football)
+        self.assertEqual(summary["created"], 0)
+        self.assertEqual(Match.objects.filter(external_id="e1").count(), 1)
+        self.assertEqual(Team.objects.filter(name="Arsenal").count(), 1)
+
+    def test_unknown_teams_are_created_with_their_image(self):
+        provider = FakeProvider(
+            [external_event(home_image="https://img.example/arsenal.png")]
+        )
+        summary = import_fixtures(provider, self.football)
+
+        self.assertEqual(
+            summary["new_teams"], ["Football: Arsenal", "Football: Chelsea"]
+        )
+        arsenal = Team.objects.get(name="Arsenal", sport=self.football)
+        self.assertTrue(arsenal.flag.name.endswith(".png"))
+        self.assertFalse(Team.objects.get(name="Chelsea").flag)
+        self.assertEqual(provider.image_requests, ["https://img.example/arsenal.png"])
+
+    def test_images_are_skipped_when_not_downloading(self):
+        provider = FakeProvider(
+            [external_event(home_image="https://img.example/arsenal.png")]
+        )
+        import_fixtures(provider, self.football, download_images=False)
+        self.assertEqual(provider.image_requests, [])
+
+    def test_alias_maps_a_differently_spelled_name(self):
+        united = Team.objects.create(name="Manchester Utd", sport=self.football)
+        TeamAlias.objects.create(source="fake", external_name="Man United", team=united)
+        import_fixtures(FakeProvider([external_event(home="Man United")]), self.football)
+        self.assertEqual(Match.objects.get(external_id="e1").team_a, united)
+        self.assertFalse(Team.objects.filter(name="Man United").exists())
+
+    def test_past_finished_and_called_off_events_are_skipped(self):
+        provider = FakeProvider([
+            external_event("past", start_time=timezone.now() - timedelta(hours=1)),
+            external_event("done", result="home"),
+            external_event("off", called_off=True),
+        ])
+        summary = import_fixtures(provider, self.football)
+        self.assertEqual(summary["skipped"], 3)
+        self.assertFalse(Match.objects.filter(external_source="fake").exists())
+
+    def test_kickoff_change_moves_start_and_keeps_deadline_offset(self):
+        event = external_event()
+        import_fixtures(FakeProvider([event]), self.football)
+        match = Match.objects.get(external_id="e1")
+        match.prediction_deadline = match.start_time - timedelta(minutes=30)
+        match.save()
+
+        moved = external_event(start_time=event.start_time + timedelta(hours=1))
+        summary = import_fixtures(FakeProvider([moved]), self.football)
+
+        self.assertEqual(summary["updated"], 1)
+        match.refresh_from_db()
+        self.assertEqual(match.start_time, moved.start_time)
+        self.assertEqual(
+            match.prediction_deadline, moved.start_time - timedelta(minutes=30)
+        )
+
+
+class SyncResultsTests(TestCase):
+    def setUp(self):
+        self.football = Sport.objects.get(name="Football")
+        self.alice = make_user("alice")
+
+    def test_result_is_only_suggested_and_nothing_is_scored(self):
+        match = awaiting_external_match()
+        Prediction.objects.create(user=self.alice, match=match, choice="A")
+        provider = FakeProvider(results={"e1": external_event(result="home")})
+
+        summary = sync_results(provider, self.football)
+
+        self.assertEqual(summary["suggested"], 1)
+        match.refresh_from_db()
+        self.assertEqual(match.suggested_winner, match.team_a)
+        self.assertIsNotNone(match.suggested_at)
+        self.assertIsNone(match.winner)
+        self.assertEqual(match.status, Match.Status.AWAITING_RESULT)
+        self.assertFalse(match.is_scored)
+        self.alice.profile.refresh_from_db()
+        self.assertEqual(self.alice.profile.points, 0)
+
+    def test_draw_is_suggested(self):
+        match = awaiting_external_match()
+        sync_results(
+            FakeProvider(results={"e1": external_event(result="draw")}), self.football
+        )
+        match.refresh_from_db()
+        self.assertTrue(match.suggested_is_draw)
+        self.assertIsNone(match.suggested_winner)
+
+    def test_unfinished_and_future_matches_get_no_suggestion(self):
+        awaiting_external_match()
+        sport_match(
+            "Football", "Leeds", "Everton", external_source="fake", external_id="e2"
+        )
+        provider = FakeProvider(results={
+            "e1": external_event(result=None),
+            "e2": external_event("e2", result="home"),
+        })
+        summary = sync_results(provider, self.football)
+        self.assertEqual(summary["suggested"], 0)
+        self.assertFalse(Match.objects.filter(suggested_at__isnull=False).exists())
+
+    def test_matches_long_past_kickoff_are_left_for_the_admin(self):
+        old = timezone.now() - timedelta(days=4)
+        awaiting_external_match(start_time=old, prediction_deadline=old)
+        recent = awaiting_external_match(external_id="e2", home="Leeds", away="Everton")
+        provider = FakeProvider(results={"e1": external_event(result="home")})
+
+        summary = sync_results(provider, self.football)
+
+        self.assertEqual(list(provider.requested_kickoffs), ["e2"])
+        self.assertEqual(provider.requested_kickoffs["e2"], recent.start_time)
+        self.assertEqual(summary["suggested"], 0)
+        self.assertEqual(summary["enter_by_hand"], ["Arsenal vs Chelsea"])
+
+    def test_nothing_pending_asks_the_provider_nothing(self):
+        provider = FakeProvider()
+        sync_results(provider, self.football)
+        self.assertFalse(hasattr(provider, "requested_kickoffs"))
+
+    def test_called_off_match_is_reported(self):
+        awaiting_external_match()
+        provider = FakeProvider(results={"e1": external_event(called_off=True)})
+        summary = sync_results(provider, self.football)
+        self.assertEqual(summary["called_off"], ["Arsenal vs Chelsea"])
+
+
+class ConfirmSuggestedResultTests(TestCase):
+    def setUp(self):
+        self.alice = make_user("alice")
+        self.bob = make_user("bob")
+
+    def _points(self, user):
+        user.profile.refresh_from_db()
+        return user.profile.points
+
+    def test_confirming_finishes_and_scores_the_match(self):
+        match = awaiting_external_match()
+        Prediction.objects.create(user=self.alice, match=match, choice="A")
+        Prediction.objects.create(user=self.bob, match=match, choice="B")
+        match.suggested_winner = match.team_a
+        match.suggested_at = timezone.now()
+        match.save()
+
+        confirm_suggested_result(match)
+
+        match.refresh_from_db()
+        self.assertEqual(match.winner, match.team_a)
+        self.assertEqual(match.status, Match.Status.FINISHED)
+        self.assertTrue(match.is_scored)
+        self.assertEqual(self._points(self.alice), POINTS_CORRECT)
+        self.assertEqual(self._points(self.bob), POINTS_WRONG)
+
+    def test_draw_on_a_sport_without_draws_is_rejected(self):
+        match = awaiting_external_match("Tennis")
+        match.suggested_is_draw = True
+        match.save()
+        with self.assertRaises(ValidationError):
+            confirm_suggested_result(match)
+        match.refresh_from_db()
+        self.assertFalse(match.is_draw)
+        self.assertEqual(match.status, Match.Status.AWAITING_RESULT)
+
+    def test_match_without_suggestion_is_rejected(self):
+        with self.assertRaises(ValidationError):
+            confirm_suggested_result(awaiting_external_match())
+
+
+class ConfirmSuggestedResultsAdminTests(TestCase):
+    def setUp(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
+        self.url = reverse("admin:predictions_match_changelist")
+
+    def test_action_confirms_and_reports_failures(self):
+        good = awaiting_external_match(external_id="e1")
+        good.suggested_winner = good.team_b
+        good.save()
+        without = sport_match(
+            "Football", "Leeds", "Everton", status=Match.Status.AWAITING_RESULT
+        )
+
+        response = self.client.post(
+            self.url,
+            {
+                "action": "confirm_suggested_results",
+                "_selected_action": [good.pk, without.pk],
+            },
+            follow=True,
+        )
+
+        good.refresh_from_db()
+        self.assertEqual(good.winner, good.team_b)
+        self.assertTrue(good.is_scored)
+        self.assertContains(response, "1 result(s) confirmed")
+        self.assertContains(response, "no suggested result")
+
+    def test_pending_filter_lists_only_unconfirmed_suggestions(self):
+        pending = awaiting_external_match()
+        pending.suggested_winner = pending.team_a
+        pending.save()
+        sport_match("Football", "Leeds", "Everton")
+
+        response = self.client.get(self.url, {"suggested": "pending"})
+
+        self.assertEqual(list(response.context["cl"].result_list), [pending])
+
+    def test_change_form_shows_suggested_result(self):
+        match = awaiting_external_match()
+        match.suggested_winner = match.team_a
+        match.save()
+        response = self.client.get(
+            reverse("admin:predictions_match_change", args=[match.pk])
+        )
+        self.assertContains(response, "Suggested result")
+        self.assertContains(response, "Arsenal")
+
+
+def flashlive_response(data, status=200):
+    response = mock.Mock(status_code=status, text=json.dumps(data))
+    response.json.return_value = {"DATA": data}
+    return response
+
+
+def flashlive_group(events, name="ENGLAND: Premier League", template_id="tpl1"):
+    return {"NAME": name, "TOURNAMENT_TEMPLATE_ID": template_id, "EVENTS": events}
+
+
+def flashlive_event(event_id="fl1", **kwargs):
+    raw = {
+        "EVENT_ID": event_id,
+        "START_TIME": int((timezone.now() + timedelta(days=1)).timestamp()),
+        "HOME_NAME": "Arsenal",
+        "AWAY_NAME": "Chelsea",
+        "STAGE_TYPE": "SCHEDULED",
+        "HOME_IMAGES": ["https://img.example/a.png"],
+    }
+    raw.update(kwargs)
+    return raw
+
+
+class FlashLiveProviderTests(SimpleTestCase):
+    def _provider(self, responses, tournaments=("Premier League",)):
+        session = mock.Mock()
+        session.get.side_effect = responses
+        provider = FlashLiveProvider(
+            api_key="key", tournaments=tournaments, sport_ids={}, session=session
+        )
+        return provider, session
+
+    def test_fixtures_keep_only_listed_tournaments(self):
+        provider, session = self._provider([
+            flashlive_response([
+                flashlive_group([flashlive_event("fl1")]),
+                flashlive_group(
+                    [flashlive_event("fl2")], name="SPAIN: LaLiga", template_id="tpl2"
+                ),
+            ]),
+            flashlive_response([], status=404),
+        ])
+
+        events = provider.fetch_fixtures("Football", days_ahead=1)
+
+        self.assertEqual([e.external_id for e in events], ["fl1"])
+        event = events[0]
+        self.assertEqual((event.home, event.away), ("Arsenal", "Chelsea"))
+        self.assertEqual(event.event_name, "Premier League")
+        self.assertEqual(event.home_image, "https://img.example/a.png")
+        self.assertIsNone(event.result)
+        self.assertEqual(session.get.call_args_list[0].kwargs["params"]["sport_id"], 1)
+
+    def test_no_tournaments_configured_imports_nothing(self):
+        provider, session = self._provider([], tournaments=())
+        self.assertEqual(provider.fetch_fixtures("Football", 7), [])
+        session.get.assert_not_called()
+
+    def test_new_day_only_fetches_just_the_last_day(self):
+        provider, session = self._provider([
+            flashlive_response([flashlive_group([flashlive_event("fl1")])]),
+        ])
+        events = provider.fetch_fixtures("Football", days_ahead=3, new_day_only=True)
+        self.assertEqual([e.external_id for e in events], ["fl1"])
+        self.assertEqual(session.get.call_count, 1)
+        self.assertEqual(session.get.call_args.kwargs["params"]["indent_days"], 3)
+        self.assertEqual(provider.requests_made, 1)
+
+    def test_results_fetch_only_kickoff_days(self):
+        now = timezone.now()
+        provider, session = self._provider([
+            flashlive_response([flashlive_group([
+                flashlive_event("y", STAGE_TYPE="FINISHED", WINNER=1),
+            ])]),
+            flashlive_response([]),
+        ])
+        found = provider.fetch_results("Football", {
+            "y": now - timedelta(days=1),
+            "t1": now,
+            "t2": now,
+            "too_old": now - timedelta(days=9),
+            "future": now + timedelta(days=1),
+        })
+        self.assertEqual(
+            [c.kwargs["params"]["indent_days"] for c in session.get.call_args_list],
+            [-1, 0],
+        )
+        self.assertEqual(found["y"].result, "home")
+        self.assertEqual(provider.requests_made, 2)
+
+    def test_list_tournaments_gives_full_names_and_counts(self):
+        provider, _ = self._provider([
+            flashlive_response([
+                flashlive_group([flashlive_event("a"), flashlive_event("b")]),
+                flashlive_group([], name="India: IFA Shield"),
+            ]),
+        ])
+        self.assertEqual(
+            provider.list_tournaments("Football"),
+            [("ENGLAND: Premier League", 2), ("India: IFA Shield", 0)],
+        )
+
+    def test_results_are_mapped_from_winner_and_score(self):
+        provider, _ = self._provider([
+            flashlive_response([flashlive_group([
+                flashlive_event("w", STAGE_TYPE="FINISHED", WINNER=2),
+                flashlive_event(
+                    "d", STAGE_TYPE="FINISHED",
+                    HOME_SCORE_CURRENT="1", AWAY_SCORE_CURRENT="1",
+                ),
+                flashlive_event("p", STAGE_TYPE="FINISHED", STAGE="POSTPONED"),
+                flashlive_event("live", STAGE_TYPE="LIVE", WINNER=1),
+            ])]),
+        ])
+
+        now = timezone.now()
+        found = provider.fetch_results(
+            "Football", {i: now for i in ("w", "d", "p", "live")}
+        )
+
+        self.assertEqual(found["w"].result, "away")
+        self.assertEqual(found["d"].result, "draw")
+        self.assertTrue(found["p"].called_off)
+        self.assertIsNone(found["p"].result)
+        self.assertIsNone(found["live"].result)
+
+    def test_cricket_result_needs_an_explicit_winner(self):
+        provider, _ = self._provider([
+            flashlive_response([flashlive_group([
+                flashlive_event(
+                    "c", STAGE_TYPE="FINISHED",
+                    HOME_SCORE_CURRENT="245", AWAY_SCORE_CURRENT="245",
+                ),
+            ])]),
+        ])
+        self.assertIsNone(
+            provider.fetch_results("Cricket", {"c": timezone.now()})["c"].result
+        )
+
+    def test_http_error_raises_provider_error(self):
+        provider, _ = self._provider([flashlive_response([], status=429)])
+        with self.assertRaises(ProviderError):
+            provider.fetch_results("Football", {"x": timezone.now()})
+
+    def test_missing_key_raises_provider_error(self):
+        provider = FlashLiveProvider(
+            api_key="", tournaments=("x",), sport_ids={}, session=mock.Mock()
+        )
+        with self.assertRaises(ProviderError):
+            provider.fetch_fixtures("Football", 0)
+
+    def test_sport_ids_can_be_overridden(self):
+        provider = FlashLiveProvider(
+            api_key="k", tournaments=(), sport_ids={"Hockey": "24"}, session=mock.Mock()
+        )
+        self.assertEqual(provider.sport_ids["Hockey"], 24)
+        self.assertFalse(provider.supports("Curling"))
+
+
+class SyncExternalMatchesCommandTests(TestCase):
+    COMMAND_MODULE = "predictions.management.commands.sync_external_matches"
+
+    def _run(self, provider, *args):
+        out, err = StringIO(), StringIO()
+        with mock.patch(f"{self.COMMAND_MODULE}.get_providers", return_value=[provider]):
+            call_command("sync_external_matches", *args, stdout=out, stderr=err)
+        return out.getvalue() + err.getvalue()
+
+    def test_imports_fixtures_for_the_chosen_sport(self):
+        output = self._run(
+            FakeProvider([external_event()]), "--fixtures", "--sport", "football"
+        )
+        self.assertTrue(Match.objects.filter(external_id="e1").exists())
+        self.assertIn("Football fixtures: 1 created", output)
+        self.assertIn("API requests used this run: 0", output)
+        self.assertIn("new team (please review): Football: Arsenal", output)
+
+    def test_dry_run_saves_nothing(self):
+        output = self._run(FakeProvider([external_event()]), "--fixtures", "--dry-run")
+        self.assertFalse(Match.objects.filter(external_id="e1").exists())
+        self.assertFalse(Team.objects.filter(name="Arsenal").exists())
+        self.assertIn("Dry run", output)
+
+    def test_results_are_suggested(self):
+        awaiting_external_match()
+        output = self._run(
+            FakeProvider(results={"e1": external_event(result="away")}),
+            "--results",
+            "--sport",
+            "Football",
+        )
+        self.assertIn("Football results: 1 suggested", output)
+
+    def test_new_day_only_is_passed_to_the_provider(self):
+        provider = FakeProvider([external_event()])
+        self._run(provider, "--fixtures", "--sport", "Football", "--new-day-only")
+        self.assertTrue(provider.new_day_only)
+
+    def test_list_tournaments(self):
+        out = StringIO()
+        with mock.patch(
+            f"{self.COMMAND_MODULE}.FlashLiveProvider.list_tournaments",
+            return_value=[("England: Premier League", 10)],
+        ):
+            call_command(
+                "sync_external_matches", "--list-tournaments", "--sport", "football",
+                stdout=out,
+            )
+        self.assertIn("England: Premier League	(10 matches)", out.getvalue())
+        self.assertIn("API requests used this run:", out.getvalue())
+
+    def test_requires_a_mode_and_a_provider(self):
+        with self.assertRaises(CommandError):
+            call_command("sync_external_matches")
+        with mock.patch(f"{self.COMMAND_MODULE}.get_providers", return_value=[]):
+            with self.assertRaises(CommandError):
+                call_command("sync_external_matches", "--results")

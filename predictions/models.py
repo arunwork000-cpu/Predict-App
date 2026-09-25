@@ -111,6 +111,30 @@ class Team(models.Model):
         return self.name
 
 
+class TeamAlias(models.Model):
+    """Maps a team name used by an external data source to a Team, for the
+    rare name that doesn't match Team.name exactly (see
+    predictions/importers). Edit in the admin to fix a wrong mapping."""
+
+    source = models.CharField(max_length=30)
+    external_name = models.CharField(max_length=100)
+    team = models.ForeignKey(Team, on_delete=models.CASCADE, related_name="aliases")
+
+    class Meta:
+        ordering = ["source", "external_name"]
+        verbose_name = "team name alias"
+        verbose_name_plural = "team name aliases"
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "external_name"],
+                name="unique_team_alias_per_source",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.external_name} ({self.source}) -> {self.team}"
+
+
 class Match(models.Model):
     class Status(models.TextChoices):
         SCHEDULED = "scheduled", "Scheduled"
@@ -185,6 +209,22 @@ class Match(models.Model):
     )
     # Used later when scoring predictions; not part of the public match form.
     is_scored = models.BooleanField(default=False)
+    # Set for matches created by the sync_external_matches command (see
+    # predictions/importers). Blank for matches entered by hand.
+    external_source = models.CharField(max_length=30, blank=True, default="")
+    external_id = models.CharField(max_length=64, blank=True, default="")
+    # The result reported by the external source. It never touches
+    # winner/is_draw on its own: an admin confirms it (the "Confirm suggested
+    # results" action), and only then are predictions scored.
+    suggested_winner = models.ForeignKey(
+        Team,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="+",
+    )
+    suggested_is_draw = models.BooleanField(default=False)
+    suggested_at = models.DateTimeField(null=True, blank=True)
 
     class Meta:
         ordering = ["start_time"]
@@ -193,7 +233,12 @@ class Match(models.Model):
             models.CheckConstraint(
                 condition=~models.Q(team_a=models.F("team_b")),
                 name="match_team_a_ne_team_b",
-            )
+            ),
+            models.UniqueConstraint(
+                fields=["external_source", "external_id"],
+                condition=~models.Q(external_id=""),
+                name="unique_external_match",
+            ),
         ]
 
     def __str__(self):
@@ -223,6 +268,11 @@ class Match(models.Model):
     def has_result(self):
         """True once a winner or a draw has been entered."""
         return self.winner_id is not None or self.is_draw
+
+    @property
+    def has_suggested_result(self):
+        """True once the external source has reported a winner or a draw."""
+        return self.suggested_winner_id is not None or self.suggested_is_draw
 
     def winner_name(self):
         if self.is_draw:
