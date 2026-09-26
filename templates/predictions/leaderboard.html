@@ -7,7 +7,7 @@
     <h2 class="h5 mb-2" id="lb-all-time-heading">All-Time</h2>
     {% include "predictions/_leaderboard_table.html" with profiles=all_time_profiles is_monthly=False %}
   </section>
-  <section class="col-12 col-lg-6" id="leaderboard-monthly" aria-labelledby="lb-monthly-heading">
+  <section class="col-12 col-lg-6 order-lg-first" id="leaderboard-monthly" aria-labelledby="lb-monthly-heading">
     {# Repeated title only when the boards sit side by side; stacked, the one above All-Time covers both. #}
     <h2 class="h3 mb-3 d-none d-lg-block">Leaderboard</h2>
     <div class="d-flex flex-wrap align-items-center gap-2 mb-2">

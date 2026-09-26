@@ -1479,7 +1479,7 @@ class LeaderboardViewTests(TestCase):
         marker = f'id="leaderboard-{section}"'
         content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
-        at = body.index(f"<td>{username}</td>")
+        at = body.index(f'<td class="lb-cell">{username}</td>')
         start = body.rindex("<tr", 0, at)
         stop = body.index("</tr>", at)
         return body[start:stop]
@@ -1849,15 +1849,20 @@ class VoucherAnnouncementTests(TestCase):
         self.assertNotContains(response, "Gift vouchers are expected to be issued")
 
 
+@mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
 class LeaderboardMedalTests(TestCase):
-    """Gold/silver/bronze medal images next to the top three rows only."""
+    """Gold/silver/bronze medal images next to the top three rows only.
+
+    The 50-prediction medal floor is switched off (start day 32 never comes),
+    so these rank-only tests pass on any day of the month.
+    """
 
     @staticmethod
     def _row_for(content, username, section="all-time"):
         marker = f'id="leaderboard-{section}"'
         content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
-        at = body.index(f"<td>{username}</td>")
+        at = body.index(f'<td class="lb-cell">{username}</td>')
         start = body.rindex("<tr", 0, at)
         stop = body.index("</tr>", at)
         return body[start:stop]
