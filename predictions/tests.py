@@ -2040,7 +2040,7 @@ class SportMatchesViewTests(TestCase):
         response = self.client.get(reverse("sport_matches", args=["football"]))
 
         self.assertContains(response, "Predicted")
-        self.assertContains(response, "If win get:")
+        self.assertContains(response, "If Win get:")
         self.assertContains(response, "If Lose/Draw get:")
 
     def test_open_match_shows_predict_the_win_label(self):
@@ -2062,10 +2062,10 @@ class SportMatchesViewTests(TestCase):
 
         response = self.client.get(reverse("sport_matches", args=["tennis"]))
 
-        self.assertContains(response, "If win get: <strong>+20</strong>")
-        self.assertContains(response, "If lose get: <strong>-8</strong>")
-        self.assertContains(response, "If win get: <strong>+15</strong>")
-        self.assertContains(response, "If lose get: <strong>-3</strong>")
+        self.assertContains(response, "If Win get: <strong>+20</strong>")
+        self.assertContains(response, "If Lose get: <strong>-8</strong>")
+        self.assertContains(response, "If Win get: <strong>+15</strong>")
+        self.assertContains(response, "If Lose get: <strong>-3</strong>")
 
     def test_authenticated_user_can_predict_directly_from_a_sport_page(self):
         match = sport_match("Badminton", "BA inline", "BB inline")
@@ -2095,7 +2095,7 @@ class SportMatchesViewTests(TestCase):
         response = self.client.get(reverse("sport_matches", args=["football"]))
 
         self.assertNotContains(response, "<form")
-        self.assertContains(response, "If win get:")
+        self.assertContains(response, "If Win get:")
         self.assertContains(response, "If Lose/Draw get:")
 
     def test_guest_sees_login_to_predict_and_not_the_predict_link(self):
@@ -2105,6 +2105,38 @@ class SportMatchesViewTests(TestCase):
 
         self.assertContains(response, "Log in to predict")
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
+
+    def _order_after_picks(self, picked):
+        """Create four Football matches (M1..M4 by start time), have alice pick
+        `picked` in that order, and return the team names as the page lists them."""
+        now = timezone.now()
+        matches = {
+            n: sport_match(
+                "Football", f"Home{n}", f"Away{n}",
+                start_time=now + timedelta(hours=n + 1),
+                prediction_deadline=now + timedelta(hours=n),
+            )
+            for n in (1, 2, 3, 4)
+        }
+        alice = make_user("alice", password="pass12345")
+        for offset, n in enumerate(picked):
+            pick = Prediction.objects.create(user=alice, match=matches[n], choice="A")
+            Prediction.objects.filter(pk=pick.pk).update(
+                updated_at=now + timedelta(minutes=offset)
+            )
+        self.client.login(username="alice", password="pass12345")
+        content = self.client.get(
+            reverse("sport_matches", args=["football"])
+        ).content.decode()
+        return sorted((1, 2, 3, 4), key=lambda n: content.index(f"Home{n}<"))
+
+    def test_latest_pick_sits_just_below_the_next_match_to_predict(self):
+        # Picked M1 then M3: next to predict (M2) first, latest pick (M3)
+        # second, then the rest of the unpredicted, then older picks.
+        self.assertEqual(self._order_after_picks([1, 3]), [2, 3, 4, 1])
+
+    def test_latest_pick_is_first_once_everything_is_predicted(self):
+        self.assertEqual(self._order_after_picks([4, 1, 3, 2]), [2, 1, 3, 4])
 
     def test_empty_state_message_names_the_sport(self):
         response = self.client.get(reverse("sport_matches", args=["tennis"]))
@@ -2858,7 +2890,7 @@ class NoDrawMatchTests(TestCase):
                 self.assertNotContains(response, 'value="D"')
                 self.assertNotContains(response, "If Draw get")
                 self.assertNotContains(response, "Lose/Draw")
-                self.assertContains(response, "If lose get:")
+                self.assertContains(response, "If Lose get:")
                 self.assertContains(response, "col-6")
                 self.assertNotContains(response, "col-4")
 
@@ -3611,13 +3643,13 @@ class LoseDrawLabelTests(TestCase):
             with self.subTest(sport=sport_name):
                 response = self._page(sport_name)
                 self.assertContains(response, "If Lose/Draw get:")
-                self.assertNotContains(response, "If lose get:")
+                self.assertNotContains(response, "If Lose get:")
 
     def test_sports_without_draws_keep_lose_label(self):
         for sport_name in ("Tennis", "Badminton"):
             with self.subTest(sport=sport_name):
                 response = self._page(sport_name)
-                self.assertContains(response, "If lose get:")
+                self.assertContains(response, "If Lose get:")
                 self.assertNotContains(response, "Lose/Draw")
 
 
@@ -3672,10 +3704,12 @@ class MatchTitleAndPointsMarkupTests(TestCase):
                 if logged_in:
                     self.client.login(username="alice", password="pass12345")
                 response = self.client.get(reverse("sport_matches", args=["football"]))
-                self.assertContains(response, "If win get: <strong>+10</strong>")
-                self.assertContains(response, "If Lose/Draw get: <strong>-5</strong>")
+                # Logged-in pick boxes show negative points in red.
+                neg = ' class="pts-negative"' if logged_in else ""
+                self.assertContains(response, "If Win get: <strong>+10</strong>")
+                self.assertContains(response, f"If Lose/Draw get: <strong{neg}>-5</strong>")
                 self.assertContains(response, "If Draw get: <strong>+7</strong>")
-                self.assertContains(response, "If Win/Lose get: <strong>-2</strong>")
+                self.assertContains(response, f"If Win/Lose get: <strong{neg}>-2</strong>")
 
 
 class ReferralCodeGenerationTests(TestCase):

@@ -77,6 +77,14 @@ def sport_matches(request, sport_slug):
     # full-page reload a submitted prediction causes, the next match to
     # predict is near the top instead of buried below ones already done.
     open_matches.sort(key=lambda m: (m.user_pick is not None, m.start_time))
+    # The most recently saved pick goes second, just below the next match to
+    # predict, so the user can still see it without scrolling.
+    predicted = [m for m in open_matches if m.user_pick is not None]
+    if predicted:
+        latest = max(predicted, key=lambda m: m.user_pick.updated_at)
+        open_matches.remove(latest)
+        position = 1 if open_matches and open_matches[0].user_pick is None else 0
+        open_matches.insert(position, latest)
 
     return render(
         request,
