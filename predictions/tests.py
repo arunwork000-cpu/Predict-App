@@ -2530,15 +2530,16 @@ class MatchAdminActionTests(TestCase):
         self.assertContains(response, "predictions/admin/match_admin.css")
         self.assertContains(response, "predictions/admin/match_points.js")
 
-    def test_points_autofill_applies_only_to_tennis_and_badminton(self):
+    def test_points_autofill_applies_only_to_tennis_badminton_and_cricket(self):
         tennis, _ = Sport.objects.get_or_create(name="Tennis")
         badminton, _ = Sport.objects.get_or_create(name="Badminton")
+        cricket, _ = Sport.objects.get_or_create(name="Cricket")
         football, _ = Sport.objects.get_or_create(name="Football")
         response = self.client.get(reverse("admin:predictions_match_add"))
         widget = response.context["adminform"].form.fields["sport"].widget
         widget = getattr(widget, "widget", widget)
         ids = json.loads(widget.attrs["data-autofill-points-sports"])
-        self.assertCountEqual(ids, [tennis.pk, badminton.pk])
+        self.assertCountEqual(ids, [tennis.pk, badminton.pk, cricket.pk])
         self.assertNotIn(football.pk, ids)
 
     def test_add_form_exposes_all_four_points_fields(self):
@@ -3635,7 +3636,9 @@ class MatchTitleAndPointsMarkupTests(TestCase):
         response = self.client.get(reverse("sport_matches", args=["football"]))
 
         self.assertContains(
-            response, f'<a href="{url}">TA link</a> Vs <a href="{url}">TB link</a>'
+            response,
+            f'<a class="match-title-link" href="{url}">TA link</a> Vs '
+            f'<a class="match-title-link" href="{url}">TB link</a>',
         )
         self.assertNotContains(response, "TA link vs")
 

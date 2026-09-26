@@ -85,7 +85,7 @@ def _int_or_none(value):
 
 
 # Sports whose admin points fields follow a 100-point split (see match_points.js).
-POINTS_AUTOFILL_SPORTS = ("Tennis", "Badminton")
+POINTS_AUTOFILL_SPORTS = ("Tennis", "Badminton", "Cricket")
 
 
 class MatchAdminForm(forms.ModelForm):
@@ -175,6 +175,21 @@ class SuggestedResultFilter(admin.SimpleListFilter):
         return queryset
 
 
+class PublishedFilter(admin.SimpleListFilter):
+    title = "publication"
+    parameter_name = "published"
+
+    def lookups(self, request, model_admin):
+        return (("yes", "Published"), ("no", "To be published"))
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.filter(is_published=True)
+        if self.value() == "no":
+            return queryset.filter(is_published=False)
+        return queryset
+
+
 @admin.register(Match)
 class MatchAdmin(admin.ModelAdmin):
     form = MatchAdminForm
@@ -203,11 +218,11 @@ class MatchAdmin(admin.ModelAdmin):
         "is_scored",
     )
     list_filter = (
+        PublishedFilter,
         "sport",
         "status",
         SuggestedResultFilter,
         "is_draw",
-        "is_published",
         "is_scored",
     )
     search_fields = ("team_a__name", "team_b__name", "event_name")
@@ -215,6 +230,27 @@ class MatchAdmin(admin.ModelAdmin):
     # they can be filtered by sport; see MatchAdminForm.
     date_hierarchy = "start_time"
     actions = ("publish_matches", "unpublish_matches", "confirm_suggested_results")
+    change_list_template = "admin/predictions/match/change_list.html"
+
+    def changelist_view(self, request, extra_context=None):
+        # Links for the "Filter by publication" row under the date hierarchy.
+        # Each keeps the other active filters and drops the page number.
+        current = request.GET.get(PublishedFilter.parameter_name, "")
+        links = []
+        for value, title in (("", "All"), ("yes", "Published"), ("no", "To be published")):
+            params = request.GET.copy()
+            params.pop("p", None)
+            params.pop(PublishedFilter.parameter_name, None)
+            if value:
+                params[PublishedFilter.parameter_name] = value
+            query = params.urlencode()
+            links.append({
+                "title": title,
+                "link": f"?{query}" if query else "?",
+                "selected": value == current,
+            })
+        extra_context = {**(extra_context or {}), "publication_links": links}
+        return super().changelist_view(request, extra_context=extra_context)
     # is_scored is managed by the scoring service. winner stays editable even
     # after scoring so a mistaken result can be corrected (score_match then
     # reconciles the points).
@@ -260,7 +296,7 @@ class MatchAdmin(admin.ModelAdmin):
                 "The Draw points apply only to Football, Cricket and Hockey. "
                 "Enter 0 in both Draw fields if the match cannot end in a draw: "
                 "the Draw box is then hidden and users pick only Team A or Team B. "
-                "For Tennis and Badminton, entering Team A win points fills the other "
+                "For Tennis, Badminton and Cricket, entering Team A win points fills the other "
                 "fields (100-point split); all stay editable."
             ),
         }),

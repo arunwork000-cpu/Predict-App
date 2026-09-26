@@ -1,4 +1,4 @@
-// Match admin: for Tennis and Badminton, typing Team A win points fills the
+// Match admin: for Tennis, Badminton and Cricket, typing Team A win points fills the
 // other points fields as a 100-point split. Example: A win 60 gives
 // A lose -40, B win 40, B lose -60, Draw win 0 and Draw lose 0.
 // The sport ids are embedded on the Sport <select> as
