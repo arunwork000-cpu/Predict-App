@@ -263,6 +263,9 @@ FLASHLIVE_EXCLUDE_TOURNAMENTS = env.list('FLASHLIVE_EXCLUDE_TOURNAMENTS', defaul
 # Overrides/additions for our sport name -> FlashLive sport_id. Hockey is not
 # imported by default (entered by hand); "Hockey=24" would add field hockey.
 FLASHLIVE_SPORT_IDS = env.dict('FLASHLIVE_SPORT_IDS', default={})
+# Whole hours from UTC that "today"/"tomorrow" are counted in for the import
+# (FlashLive takes no half hours). 5 = a day runs 00:30 to 00:30 IST.
+FLASHLIVE_UTC_OFFSET = env.int('FLASHLIVE_UTC_OFFSET', default=5)
 
 
 # Logging

@@ -11,7 +11,7 @@ not change the number of requests.
 
 import logging
 from fnmatch import fnmatchcase
-from datetime import datetime, timezone as dt_timezone
+from datetime import datetime, timedelta, timezone as dt_timezone
 
 import requests
 from django.conf import settings
@@ -53,6 +53,7 @@ class FlashLiveProvider(Provider):
         session=None,
         teams=None,
         exclude_tournaments=None,
+        utc_offset=None,
     ):
         self.api_key = api_key if api_key is not None else settings.RAPIDAPI_KEY
         # Tournament names or IDs; "*" wildcards allowed, e.g. "* ATP*".
@@ -84,6 +85,13 @@ class FlashLiveProvider(Provider):
                 ).items()
             },
         }
+        # Whole hours from UTC that FlashLive's days are counted in (it
+        # rejects 5.5). With 5, "tomorrow" runs 00:30 to 00:30 IST instead
+        # of UTC's 05:30 to 05:30.
+        self.utc_offset = int(
+            utc_offset if utc_offset is not None else settings.FLASHLIVE_UTC_OFFSET
+        )
+        self.local_tz = dt_timezone(timedelta(hours=self.utc_offset))
         self.session = session or make_session(
             {"x-rapidapi-key": self.api_key, "x-rapidapi-host": API_HOST}
         )
@@ -123,9 +131,9 @@ class FlashLiveProvider(Provider):
     def fetch_results(self, sport_name, kickoffs):
         # One request per kickoff day covers every match that day, so only
         # the days pending matches were played on are fetched.
-        today = datetime.now(dt_timezone.utc).date()
+        today = datetime.now(self.local_tz).date()
         days = sorted({
-            (start.astimezone(dt_timezone.utc).date() - today).days
+            (start.astimezone(self.local_tz).date() - today).days
             for start in kickoffs.values()
         })
         found = {}
@@ -185,7 +193,7 @@ class FlashLiveProvider(Provider):
                 "sport_id": self.sport_ids[sport_name],
                 "indent_days": indent_days,
                 "locale": LOCALE,
-                "timezone": 0,
+                "timezone": self.utc_offset,
             },
         )
 

@@ -4462,6 +4462,25 @@ class FlashLiveProviderTests(SimpleTestCase):
         self.assertEqual(session.get.call_args.kwargs["params"]["indent_days"], 3)
         self.assertEqual(provider.requests_made, 1)
 
+    def test_days_are_counted_near_ist(self):
+        from datetime import datetime, timezone as dt_timezone
+
+        provider, session = self._provider(
+            [flashlive_response([]), flashlive_response([])], utc_offset=5
+        )
+        provider.fetch_fixtures("Football", days_ahead=1, new_day_only=True)
+        self.assertEqual(session.get.call_args.kwargs["params"]["timezone"], 5)
+
+        # 20:00 UTC on 27 Sep is 28 Sep at UTC+5 (01:30 IST): "tomorrow".
+        fake_now = datetime(2026, 9, 27, 3, 0, tzinfo=dt_timezone.utc)
+        kickoff = datetime(2026, 9, 27, 20, 0, tzinfo=dt_timezone.utc)
+        with mock.patch("predictions.importers.flashlive.datetime") as fake_dt:
+            fake_dt.now.return_value = fake_now.astimezone(provider.local_tz)
+            fake_dt.fromtimestamp = datetime.fromtimestamp
+            provider.fetch_results("Football", {"x": kickoff})
+        # Day +1 is in the future, so nothing more is fetched.
+        self.assertEqual(session.get.call_count, 1)
+
     def test_results_fetch_only_kickoff_days(self):
         now = timezone.now()
         provider, session = self._provider([
