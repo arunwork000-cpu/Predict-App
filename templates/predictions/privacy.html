@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Privacy Policy{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-9">
+    <div class="card card-body">
+      <h1 class="h3 mb-1">Privacy Policy</h1>
+      <p class="text-muted small">Last Updated: September 24, 2026</p>
+      <p>We respect your privacy and are committed to protecting your personal data. This Privacy Policy explains how we collect, use, and safeguard your information.</p>
+
+      <h2 class="h5 mt-3">1. Information We Collect</h2>
+      <ul>
+        <li><strong>Account Information:</strong> When you sign up, we may collect your username, email address, and profile details.</li>
+        <li><strong>Verification Data:</strong> If you win a prize, we may request your state of residence and age verification details to comply with regional Indian laws.</li>
+        <li><strong>Usage Data:</strong> We collect data regarding your predictions, leaderboard scores, and interactions with the website.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">2. How We Use Your Information</h2>
+      <ul>
+        <li>To maintain your account, track leaderboard points, and rank users.</li>
+        <li>To verify your eligibility and distribute gift vouchers to the top 3 winners.</li>
+        <li>To optimize and display personalized advertisements.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">3. Third-Party Advertisements &amp; Cookies</h2>
+      <ul>
+        <li>We use third-party advertising companies (such as Google AdSense) to serve ads when you visit our Website. These companies may use cookies and web beacons to collect non-personal information (such as your IP address or browsing behavior) to serve relevant ads.</li>
+        <li>You can manage or disable cookies through your browser settings.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">4. Data Sharing</h2>
+      <ul>
+        <li>We do not sell or rent your personal information to third parties.</li>
+        <li>We may share data only if required by Indian law enforcement authorities or to comply with statutory legal processes.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">5. Contact Us</h2>
+      <p class="mb-0">
+        For any questions regarding these <a href="{% url 'terms' %}">Terms</a> or Privacy Policy, please contact the admin at:
+        <a href="mailto:winsportsapp@gmail.com">winsportsapp@gmail.com</a>.
+      </p>
+    </div>
+  </div>
+</div>
+{% endblock %}

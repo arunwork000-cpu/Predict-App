@@ -1,0 +1,292 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Predict{% endblock %} · Sports Predictions</title>
+  <script>
+    // Tell the server the visitor's time zone so times render locally.
+    (function () {
+      try {
+        var zone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        if (!zone) return;
+        var match = document.cookie.match(/(?:^|; )tz=([^;]*)/);
+        var current = match ? decodeURIComponent(match[1]) : null;
+        if (current === zone) return;
+        document.cookie = "tz=" + encodeURIComponent(zone) +
+          "; path=/; max-age=31536000; SameSite=Lax";
+        // Reload once so this first page is already in local time; skipped
+        // if cookies are blocked (no loop) and for form re-renders (POST).
+        {% if request.method == 'GET' %}
+        if (document.cookie.indexOf("tz=") !== -1) location.reload();
+        {% endif %}
+      } catch (e) {}
+    })();
+  </script>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    form input:not([type=hidden]):not([type=radio]):not([type=checkbox]):not([type=submit]),
+    form select, form textarea {
+      display: block;
+      width: 100%;
+      padding: .375rem .75rem;
+      font-size: 1rem;
+      border: 1px solid #dee2e6;
+      border-radius: .375rem;
+    }
+    form ul {
+      list-style: none;
+      padding-left: 0;
+    }
+    .pick-btn {
+      white-space: normal;
+      word-break: break-word;
+      line-height: 1.3;
+      padding: .5rem .4rem;
+    }
+    /* Pick-box colours go through Bootstrap's --bs-btn-* variables so its
+       hover/active/focus rules pick them up instead of falling back to blue. */
+    .pick-btn-unselected {
+      --bs-btn-border-width: 2px;
+      --bs-btn-bg: #fff;
+      --bs-btn-color: #1e293b;
+      --bs-btn-border-color: #cbd5e1;
+      --bs-btn-hover-bg: #f0fdf4;
+      --bs-btn-hover-color: #1e293b;
+      --bs-btn-hover-border-color: #22c55e;
+      --bs-btn-active-bg: #f0fdf4;
+      --bs-btn-active-color: #1e293b;
+      --bs-btn-active-border-color: #22c55e;
+      --bs-btn-focus-shadow-rgb: 34, 197, 94;
+    }
+    .pick-btn-unselected strong {
+      color: #15803d;
+    }
+    .pick-btn-selected {
+      --bs-btn-border-width: 2px;
+      --bs-btn-bg: #1e293b;
+      --bs-btn-color: #fff;
+      --bs-btn-border-color: #22c55e;
+      --bs-btn-hover-bg: #0f172a;
+      --bs-btn-hover-color: #fff;
+      --bs-btn-hover-border-color: #22c55e;
+      --bs-btn-active-bg: #0f172a;
+      --bs-btn-active-color: #fff;
+      --bs-btn-active-border-color: #22c55e;
+      --bs-btn-focus-shadow-rgb: 34, 197, 94;
+    }
+    .pick-btn-selected strong {
+      color: #4ade80;
+    }
+    /* Negative (losing) points are red instead of green. */
+    .pick-btn-unselected strong.pts-negative {
+      color: #dc2626;
+    }
+    .pick-btn-selected strong.pts-negative {
+      color: #f87171;
+    }
+    .sport-heading {
+      color: #0B3D2E;
+    }
+    .match-title-link {
+      color: #1e293b;
+      text-decoration: none;
+    }
+    .match-title-link:hover,
+    .match-title-link:focus {
+      color: #15803d;
+      text-decoration: underline;
+    }
+    .pick-panel {
+      width: 100%;
+    }
+    @media (min-width: 768px) {
+      .pick-panel {
+        width: 50%;
+      }
+    }
+    .team-flag {
+      height: 16px;
+      width: 22px;
+      object-fit: cover;
+      border: 1px solid rgba(0, 0, 0, .15);
+      border-radius: 2px;
+      vertical-align: middle;
+      margin-right: 4px;
+    }
+    .predict-now-badge {
+      font-size: .65rem;
+      padding: .15em .5em;
+      margin-top: 2px;
+    }
+    .medal-icon {
+      width: 26px;
+      height: 26px;
+      vertical-align: middle;
+      margin-left: 4px;
+    }
+    /* table-layout: fixed makes every column's width/max-width an actual
+       cap instead of a hint the browser overrides for nowrap content --
+       required for the ellipsis truncation below to ever kick in. */
+    .leaderboard-table {
+      table-layout: fixed;
+      width: 100%;
+    }
+    .leaderboard-table th,
+    .leaderboard-table td {
+      white-space: nowrap;
+    }
+    .leaderboard-table th:first-child,
+    .leaderboard-table td:first-child {
+      width: 2.25rem;
+    }
+    .leaderboard-table th:last-child,
+    .leaderboard-table td:last-child {
+      width: 5.5rem;
+    }
+    /* Long Player/State/Country values are truncated with an ellipsis
+       instead of stretching the row past the mobile viewport. */
+    .leaderboard-table .lb-cell {
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .leaderboard-table th:nth-child(2),
+    .leaderboard-table td:nth-child(2) {
+      width: 6.5rem;
+    }
+    .leaderboard-table th:nth-child(3),
+    .leaderboard-table td:nth-child(3) {
+      width: 7.25rem;
+    }
+    .leaderboard-table th:nth-child(4),
+    .leaderboard-table td:nth-child(4) {
+      width: 5rem;
+    }
+    .leaderboard-table th:nth-child(5),
+    .leaderboard-table td:nth-child(5) {
+      width: 3.5rem;
+    }
+    /* Right-align Count/Points so the ones digit stays in a fixed column as
+       the number gains digits, instead of shifting left-to-right. Headers
+       are right-aligned to match, so the digits sit under the header text. */
+    .leaderboard-table th:nth-last-child(2),
+    .leaderboard-table td:nth-last-child(2) {
+      text-align: right;
+    }
+    .leaderboard-table th:last-child {
+      text-align: right;
+      padding-right: 34px; /* matches the reserved medal-icon space below */
+    }
+    .leaderboard-table td:last-child {
+      text-align: right;
+      position: relative;
+      padding-right: 34px; /* reserved for the medal icon, present or not */
+    }
+    .leaderboard-table td:last-child .medal-icon {
+      position: absolute;
+      right: 8px;
+      top: 50%;
+      transform: translateY(-50%);
+      margin-left: 0;
+    }
+    @media (max-width: 575.98px) {
+      .medal-icon {
+        width: 24px;
+        height: 24px;
+      }
+    }
+    .navbar-brand-green {
+      background-color: #0B3D2E;
+    }
+  </style>
+</head>
+<body class="bg-light">
+  <nav class="navbar navbar-expand-lg navbar-dark navbar-brand-green mb-4">
+    <div class="container">
+      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav">
+        <span class="navbar-toggler-icon"></span>
+      </button>
+      <div class="collapse navbar-collapse" id="nav">
+        <ul class="navbar-nav me-auto flex-wrap">
+          {% for sport in nav_sports %}
+            <li class="nav-item">
+              <a class="nav-link lh-sm {% if sport.slug == sport_slug %}active{% endif %}"
+                 href="{% url 'sport_matches' sport.slug %}">
+                {{ sport.name }}
+                {% if sport.has_open %}
+                  <span class="badge text-bg-success d-block predict-now-badge">Predict now</span>
+                {% endif %}
+              </a>
+            </li>
+          {% endfor %}
+          <li class="nav-item">
+            <a class="nav-link {% if request.resolver_match.url_name == 'closed_matches' %}active{% endif %}"
+               href="{% url 'closed_matches' %}">Closed Matches</a>
+          </li>
+          {% if user.is_authenticated %}
+            <li class="nav-item">
+              <a class="nav-link" href="{% url 'my_predictions' %}">My Predictions</a>
+            </li>
+          {% endif %}
+          <li class="nav-item">
+            <a class="nav-link {% if request.resolver_match.url_name == 'leaderboard' %}active{% endif %}"
+               href="{% url 'leaderboard' %}">Leaderboard</a>
+          </li>
+        </ul>
+        <ul class="navbar-nav align-items-lg-center gap-lg-2">
+          {% if user.is_authenticated %}
+            <li class="nav-item">
+              <span class="navbar-text text-white-50">{{ user.username }}</span>
+            </li>
+            <li class="nav-item">
+              <span class="badge text-bg-warning">{{ user_points }} pts</span>
+            </li>
+            <li class="nav-item">
+              <a class="nav-link lh-sm {% if request.resolver_match.url_name == 'my_account' %}active{% endif %}"
+                 href="{% url 'my_account' %}">
+                My Account
+                <span class="badge text-bg-success d-block predict-now-badge">Redeem Credits</span>
+              </a>
+            </li>
+            <li class="nav-item">
+              {# Django logout is POST-only so we use a small form, not a link. #}
+              <form method="post" action="{% url 'logout' %}" class="d-inline">
+                {% csrf_token %}
+                <button type="submit" class="btn btn-outline-light btn-sm">Log out</button>
+              </form>
+            </li>
+          {% else %}
+            <li class="nav-item">
+              <a class="nav-link" href="{% url 'login' %}">Log in</a>
+            </li>
+            <li class="nav-item">
+              <a class="btn btn-primary btn-sm" href="{% url 'register' %}">Register</a>
+            </li>
+          {% endif %}
+        </ul>
+      </div>
+    </div>
+  </nav>
+
+  <main class="container pb-5">
+    {% if messages %}
+      {% for message in messages %}
+        <div class="alert alert-{{ message.tags }} alert-dismissible fade show" role="alert">
+          {{ message }}
+          <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+      {% endfor %}
+    {% endif %}
+    {% block content %}{% endblock %}
+  </main>
+
+  <footer class="container pb-4 small text-muted text-center">
+    <a class="link-secondary" href="{% url 'terms' %}">Terms and Conditions</a>
+    <span class="mx-1">·</span>
+    <a class="link-secondary" href="{% url 'privacy' %}">Privacy Policy</a>
+    <div>Free-to-play · No real-money betting</div>
+  </footer>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+</body>
+</html>

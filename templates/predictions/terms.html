@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block title %}Terms and Conditions{% endblock %}
+{% block content %}
+<div class="row justify-content-center">
+  <div class="col-lg-9">
+    <div class="card card-body">
+      <h1 class="h3 mb-1">Terms and Conditions</h1>
+      <p class="text-muted small">Last Updated: September 24, 2026</p>
+      <p>Welcome to winsports.cc (the "Website"). By accessing or using this Website, participating in sports predictions, or competing on the leaderboard, you agree to comply with and be bound by these Terms and Conditions. If you do not agree, please do not use this Website.</p>
+
+      <h2 class="h5 mt-3">1. Eligibility</h2>
+      <ul>
+        <li><strong>Age Requirement:</strong> You must be at least 18 years of age or older to participate in the leaderboard and claim any rewards.</li>
+        <li><strong>Geographical Restrictions:</strong> This Website is intended for users across India. However, due to state-specific regulations regarding online contests, residents of Assam, Andhra Pradesh, Odisha, Nagaland, Sikkim, and Telangana are NOT eligible to claim any leaderboard prizes or gift vouchers. Users from these states may play for amusement only.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">2. Nature of the Platform (Strictly Free-to-Play)</h2>
+      <ul>
+        <li>This Website is a free-to-play platform designed for sports analysis, entertainment, and evaluation of skill.</li>
+        <li><strong>No Real-Money Gambling:</strong> We do not request, accept, or handle real money, entry fees, stakes, or wagers from users. No financial risk is involved at any point.</li>
+        <li>This platform is a "Game of Skill" where leaderboard standings depend on the user's sports knowledge, research, historical data analysis, and strategic risk evaluation.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">3. Dynamic Points &amp; Scoring System</h2>
+      <ul>
+        <li><strong>Admin Determinations:</strong> Leaderboard points assigned to any prediction are decided by the Website Administrator based on statistical probabilities, team form, and match dynamics.</li>
+        <li><strong>Transparency:</strong> The points to be won or lost for any given prediction will be displayed transparently on the prediction page before you make your choice.</li>
+        <li><strong>Lock-in Period:</strong> Once a user submits a prediction, the point values for that specific submission are locked. Any subsequent changes made by the administrator to the match's probability matrix will not retroactively affect already-submitted predictions.</li>
+        <li><strong>Finality:</strong> The Administrator’s calculation of points and leaderboard rankings is final and binding. No disputes regarding point calculations will be entertained.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">4. Leaderboard &amp; Gift Voucher Prizes</h2>
+      <ul>
+        <li><strong>Prize Cap:</strong> The cumulative value of the gift vouchers distributed to the top 3 predictors will strictly not exceed ₹1,000 per calendar month, in accordance with applicable guidelines.</li>
+        <li><strong>Verification:</strong> To claim a gift voucher, winners may be required to provide a valid government-issued ID (e.g., PAN card or Aadhaar) to verify their age and state of residence.</li>
+        <li><strong>Non-Transferable:</strong> Prizes are non-transferable and cannot be exchanged for cash.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">5. Fair Play and Prohibited Activities</h2>
+      <ul>
+        <li>Users are strictly prohibited from creating multiple accounts to manipulate the leaderboard.</li>
+        <li>The use of automated bots, scripts, or scraping tools to submit predictions is banned.</li>
+        <li>If any user is found cheating, hacking, or exploiting a bug, the Website Administrator reserves the right to terminate their account and void their points immediately.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">6. Advertisement and Monetization</h2>
+      <ul>
+        <li>This website is funded entirely through advertisements and sponsorships. By using this website, you agree to the display of third-party advertisements. We do not endorse any third-party products advertised on our platform.</li>
+      </ul>
+
+      <h2 class="h5 mt-3">7. Limitation of Liability</h2>
+      <ul class="mb-3">
+        <li>The Website is provided on an "as-is" basis. We do not guarantee uninterrupted access or that match data will be 100% error-free. We are not liable for any point losses due to technical glitches or internet connection drops.</li>
+      </ul>
+
+      <p class="mb-0 small text-muted">
+        See also our <a href="{% url 'privacy' %}">Privacy Policy</a>. Questions? Contact the admin at
+        <a href="mailto:winsportsapp@gmail.com">winsportsapp@gmail.com</a>.
+      </p>
+    </div>
+  </div>
+</div>
+{% endblock %}

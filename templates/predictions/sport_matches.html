@@ -1,0 +1,108 @@
+{% extends "base.html" %}
+{% load prediction_extras %}
+{% block title %}{{ sport_name }}{% endblock %}
+{% block content %}
+<h1 class="h3 mb-2 sport-heading">{{ sport_name }}</h1>
+<p class="text-muted">Pick Team A or Team B{% if sport_name in draw_sports %}, or Draw,{% endif %} before the deadline. Points depend on this match's settings. This is a points game only — no real money.</p>
+
+{% if open_matches %}
+  <div class="list-group mb-4">
+    {% for match in open_matches %}
+      <div class="list-group-item">
+        <div>
+          <strong><a class="match-title-link" href="{% url 'match_detail' match.pk %}">{% team_flag match.team_a %}{{ match.team_a }}</a> Vs <a class="match-title-link" href="{% url 'match_detail' match.pk %}">{% team_flag match.team_b %}{{ match.team_b }}</a></strong>
+          <div class="small text-muted">Kickoff: {{ match.start_time|date:"N j, Y, P T" }} · Deadline: {{ match.prediction_deadline|date:"N j, Y, P T" }}</div>
+          <div class="small fw-semibold mt-1">Predict the win ( Select your Team / Player )</div>
+          {% if match.event_name %}
+            <div class="small text-muted">{{ match.event_name }}</div>
+          {% endif %}
+        </div>
+
+        <div class="pick-panel">
+          <div class="row mt-3 g-2 text-center pick-row">
+            <div class="{% if match.allows_draw %}col-4{% else %}col-6{% endif %}">
+              {% if user.is_authenticated %}
+                <form method="post" action="{% url 'predict' match.pk %}">
+                  {% csrf_token %}
+                  <input type="hidden" name="choice" value="A">
+                  <button type="submit"
+                          class="btn w-100 h-100 pick-btn {% if match.user_pick.choice == 'A' %}pick-btn-selected{% else %}pick-btn-unselected{% endif %}">
+                    <div class="fw-bold">{% team_flag match.team_a %}{{ match.team_a }}</div>
+                    <div class="small">If Win get: <strong{% if match.team_a_win_points < 0 %} class="pts-negative"{% endif %}>{{ match.team_a_win_points|signed_points }}</strong></div>
+                    <div class="small">{% if match.allows_draw %}If Lose/Draw get{% else %}If Lose get{% endif %}: <strong{% if match.team_a_lose_points < 0 %} class="pts-negative"{% endif %}>{{ match.team_a_lose_points|signed_points }}</strong></div>
+                    {% if match.user_pick.choice == 'A' %}
+                      <div class="small mt-1"><span class="badge text-bg-success">Predicted</span></div>
+                    {% endif %}
+                  </button>
+                </form>
+              {% else %}
+                <div class="border rounded p-2 h-100">
+                  <div class="fw-bold">{% team_flag match.team_a %}{{ match.team_a }}</div>
+                  <div class="small text-muted">If Win get: <strong>{{ match.team_a_win_points|signed_points }}</strong></div>
+                  <div class="small text-muted">{% if match.allows_draw %}If Lose/Draw get{% else %}If Lose get{% endif %}: <strong>{{ match.team_a_lose_points|signed_points }}</strong></div>
+                </div>
+              {% endif %}
+            </div>
+            <div class="{% if match.allows_draw %}col-4{% else %}col-6{% endif %}">
+              {% if user.is_authenticated %}
+                <form method="post" action="{% url 'predict' match.pk %}">
+                  {% csrf_token %}
+                  <input type="hidden" name="choice" value="B">
+                  <button type="submit"
+                          class="btn w-100 h-100 pick-btn {% if match.user_pick.choice == 'B' %}pick-btn-selected{% else %}pick-btn-unselected{% endif %}">
+                    <div class="fw-bold">{% team_flag match.team_b %}{{ match.team_b }}</div>
+                    <div class="small">If Win get: <strong{% if match.team_b_win_points < 0 %} class="pts-negative"{% endif %}>{{ match.team_b_win_points|signed_points }}</strong></div>
+                    <div class="small">{% if match.allows_draw %}If Lose/Draw get{% else %}If Lose get{% endif %}: <strong{% if match.team_b_lose_points < 0 %} class="pts-negative"{% endif %}>{{ match.team_b_lose_points|signed_points }}</strong></div>
+                    {% if match.user_pick.choice == 'B' %}
+                      <div class="small mt-1"><span class="badge text-bg-success">Predicted</span></div>
+                    {% endif %}
+                  </button>
+                </form>
+              {% else %}
+                <div class="border rounded p-2 h-100">
+                  <div class="fw-bold">{% team_flag match.team_b %}{{ match.team_b }}</div>
+                  <div class="small text-muted">If Win get: <strong>{{ match.team_b_win_points|signed_points }}</strong></div>
+                  <div class="small text-muted">{% if match.allows_draw %}If Lose/Draw get{% else %}If Lose get{% endif %}: <strong>{{ match.team_b_lose_points|signed_points }}</strong></div>
+                </div>
+              {% endif %}
+            </div>
+            {% if match.allows_draw %}
+              <div class="col-4">
+                {% if user.is_authenticated %}
+                  <form method="post" action="{% url 'predict' match.pk %}">
+                    {% csrf_token %}
+                    <input type="hidden" name="choice" value="D">
+                    <button type="submit"
+                            class="btn w-100 h-100 pick-btn {% if match.user_pick.choice == 'D' %}pick-btn-selected{% else %}pick-btn-unselected{% endif %}">
+                      <div class="fw-bold">Draw</div>
+                      <div class="small">If Draw get: <strong{% if match.draw_win_points < 0 %} class="pts-negative"{% endif %}>{{ match.draw_win_points|signed_points }}</strong></div>
+                      <div class="small">If Win/Lose get: <strong{% if match.draw_lose_points < 0 %} class="pts-negative"{% endif %}>{{ match.draw_lose_points|signed_points }}</strong></div>
+                      {% if match.user_pick.choice == 'D' %}
+                        <div class="small mt-1"><span class="badge text-bg-success">Predicted</span></div>
+                      {% endif %}
+                    </button>
+                  </form>
+                {% else %}
+                  <div class="border rounded p-2 h-100">
+                    <div class="fw-bold">Draw</div>
+                    <div class="small text-muted">If Draw get: <strong>{{ match.draw_win_points|signed_points }}</strong></div>
+                    <div class="small text-muted">If Win/Lose get: <strong>{{ match.draw_lose_points|signed_points }}</strong></div>
+                  </div>
+                {% endif %}
+              </div>
+            {% endif %}
+          </div>
+        </div>
+
+        {% if not user.is_authenticated %}
+          <div class="mt-2">
+            <a class="btn btn-outline-primary btn-sm" href="{% url 'login' %}">Log in to predict</a>
+          </div>
+        {% endif %}
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <p class="text-muted">No upcoming {{ sport_name }} matches. Check back later.</p>
+{% endif %}
+{% endblock %}

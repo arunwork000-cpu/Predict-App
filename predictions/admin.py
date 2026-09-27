@@ -1,0 +1,555 @@
+import datetime
+import json
+
+from django import forms
+from django.contrib import admin, messages
+from django.core.exceptions import ValidationError
+from django.db.models import Count, Q
+from django.utils import timezone
+from django.utils.html import format_html
+
+from .models import (
+    CreditLedger,
+    Match,
+    Prediction,
+    Profile,
+    Referral,
+    ReferralSettings,
+    ScoreAdjustment,
+    Sport,
+    Team,
+    TeamAlias,
+    UserPredictionCount,
+    VoucherRedemption,
+)
+from .services import (
+    confirm_suggested_result,
+    fulfill_redemption,
+    reject_redemption,
+    score_match,
+    sync_match_statuses,
+)
+
+
+@admin.register(Sport)
+class SportAdmin(admin.ModelAdmin):
+    list_display = ("name",)
+    search_fields = ("name",)
+
+
+@admin.register(Team)
+class TeamAdmin(admin.ModelAdmin):
+    list_display = ("name", "sport", "flag_preview")
+    list_filter = ("sport",)
+    search_fields = ("name",)
+    autocomplete_fields = ("sport",)
+    readonly_fields = ("flag_preview",)
+    fields = ("name", "sport", "flag", "flag_preview")
+
+    @admin.display(description="Flag")
+    def flag_preview(self, obj):
+        if not obj.flag:
+            return "(no flag uploaded)"
+        return format_html(
+            '<img src="{}" alt="{} flag" style="height:24px;width:auto;">',
+            obj.flag.url,
+            obj.name,
+        )
+
+
+@admin.register(TeamAlias)
+class TeamAliasAdmin(admin.ModelAdmin):
+    list_display = ("external_name", "source", "team")
+    list_filter = ("source",)
+    search_fields = ("external_name", "team__name")
+    autocomplete_fields = ("team",)
+
+
+@admin.register(Profile)
+class ProfileAdmin(admin.ModelAdmin):
+    # country/state stay editable (not in readonly_fields) so an admin can
+    # correct a legacy account that has none, or fix a typo. points/credits
+    # and referral_code are system-managed -- see services.py.
+    list_display = ("user", "points", "credits", "referral_code", "age", "state", "country")
+    list_filter = ("country",)
+    search_fields = ("user__username", "state", "country", "referral_code")
+    readonly_fields = ("user", "points", "credits", "referral_code")
+    fields = ("user", "points", "credits", "referral_code", "age", "country", "state")
+
+
+def _int_or_none(value):
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+# Sports whose admin points fields follow a 100-point split (see match_points.js).
+POINTS_AUTOFILL_SPORTS = ("Tennis", "Badminton", "Cricket")
+
+
+class MatchAdminForm(forms.ModelForm):
+    """Match form whose team dropdowns follow the chosen sport.
+
+    Team A / Team B list only teams of the selected sport, and Winner lists
+    only the two chosen teams. The browser refills them when the sport
+    changes (static/predictions/admin/match_teams.js); the querysets here
+    make the server enforce the same rule.
+    """
+
+    class Meta:
+        model = Match
+        fields = "__all__"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        instance = self.instance
+
+        if self.is_bound:
+            sport_id = _int_or_none(self.data.get("sport"))
+            team_ids = [
+                _int_or_none(self.data.get("team_a")),
+                _int_or_none(self.data.get("team_b")),
+            ]
+        else:
+            sport_id = instance.sport_id or _int_or_none(self.initial.get("sport"))
+            team_ids = [instance.team_a_id, instance.team_b_id]
+
+        teams = (
+            Team.objects.filter(sport_id=sport_id)
+            if sport_id
+            else Team.objects.none()
+        )
+        self.fields["team_a"].queryset = teams
+        self.fields["team_b"].queryset = teams
+        empty = "---------" if sport_id else "Select a sport first"
+        self.fields["team_a"].empty_label = empty
+        self.fields["team_b"].empty_label = empty
+        self.fields["winner"].queryset = Team.objects.filter(
+            pk__in=[t for t in team_ids if t]
+        )
+
+        # sport -> [[team id, team name], ...] for the dropdown script.
+        by_sport = {}
+        for team_id, name, team_sport_id in Team.objects.values_list(
+            "id", "name", "sport_id"
+        ):
+            by_sport.setdefault(team_sport_id, []).append([team_id, name])
+        # The admin wraps FK widgets (add/change links); the <select> itself is
+        # the inner widget.
+        sport_widget = self.fields["sport"].widget
+        sport_widget = getattr(sport_widget, "widget", sport_widget)
+        sport_widget.attrs["data-teams"] = json.dumps(by_sport)
+        # Sports whose points fields are filled from Team A win points by
+        # static/predictions/admin/match_points.js.
+        sport_widget.attrs["data-autofill-points-sports"] = json.dumps(
+            list(
+                Sport.objects.filter(name__in=POINTS_AUTOFILL_SPORTS).values_list(
+                    "id", flat=True
+                )
+            )
+        )
+
+        # Django derives "Team a ..." from the field names; capitalise A/B.
+        for name, field in self.fields.items():
+            if name.startswith(("team_a", "team_b")):
+                field.label = field.label.replace("Team a", "Team A").replace(
+                    "Team b", "Team B"
+                )
+
+
+class SuggestedResultFilter(admin.SimpleListFilter):
+    title = "suggested result"
+    parameter_name = "suggested"
+
+    def lookups(self, request, model_admin):
+        return (("pending", "Awaiting confirmation"),)
+
+    def queryset(self, request, queryset):
+        if self.value() == "pending":
+            return queryset.filter(
+                Q(suggested_winner__isnull=False) | Q(suggested_is_draw=True),
+                winner__isnull=True,
+                is_draw=False,
+            )
+        return queryset
+
+
+class PublishedFilter(admin.SimpleListFilter):
+    title = "publication"
+    parameter_name = "published"
+
+    def lookups(self, request, model_admin):
+        return (("yes", "Published"), ("no", "To be published"))
+
+    def queryset(self, request, queryset):
+        if self.value() == "yes":
+            return queryset.filter(is_published=True)
+        if self.value() == "no":
+            return queryset.filter(is_published=False)
+        return queryset
+
+
+@admin.register(Match)
+class MatchAdmin(admin.ModelAdmin):
+    form = MatchAdminForm
+
+    class Media:
+        js = (
+            "predictions/admin/match_teams.js",
+            "predictions/admin/match_deadline.js",
+            "predictions/admin/match_tomorrow.js",
+            "predictions/admin/match_points.js",
+        )
+        css = {"all": ("predictions/admin/match_admin.css",)}
+
+    list_display = (
+        "team_a",
+        "team_b",
+        "sport",
+        "event_name",
+        "status",
+        "start_time",
+        "prediction_deadline",
+        "winner",
+        "is_draw",
+        "suggested_result",
+        "is_published",
+        "is_scored",
+    )
+    list_filter = (
+        PublishedFilter,
+        "sport",
+        "status",
+        SuggestedResultFilter,
+        "is_draw",
+        "is_scored",
+    )
+    search_fields = ("team_a__name", "team_b__name", "event_name")
+    # sport/team_a/team_b/winner are plain dropdowns (not autocomplete) so
+    # they can be filtered by sport; see MatchAdminForm.
+    date_hierarchy = "start_time"
+    actions = ("publish_matches", "unpublish_matches", "confirm_suggested_results")
+    change_list_template = "admin/predictions/match/change_list.html"
+
+    def changelist_view(self, request, extra_context=None):
+        # Links for the "Filter by publication" row under the date hierarchy.
+        # Each keeps the other active filters and drops the page number.
+        current = request.GET.get(PublishedFilter.parameter_name, "")
+        links = []
+        for value, title in (("", "All"), ("yes", "Published"), ("no", "To be published")):
+            params = request.GET.copy()
+            params.pop("p", None)
+            params.pop(PublishedFilter.parameter_name, None)
+            if value:
+                params[PublishedFilter.parameter_name] = value
+            query = params.urlencode()
+            links.append({
+                "title": title,
+                "link": f"?{query}" if query else "?",
+                "selected": value == current,
+            })
+        extra_context = {**(extra_context or {}), "publication_links": links}
+        return super().changelist_view(request, extra_context=extra_context)
+    # is_scored is managed by the scoring service. winner stays editable even
+    # after scoring so a mistaken result can be corrected (score_match then
+    # reconciles the points).
+    readonly_fields = (
+        "is_scored",
+        "suggested_result",
+        "external_source",
+        "external_id",
+        "suggested_at",
+    )
+    fieldsets = (
+        (None, {
+            "fields": (
+                "sport",
+                "event_name",
+                "team_a",
+                "team_b",
+                "start_time",
+                "prediction_deadline",
+                "status",
+                "winner",
+                "is_draw",
+                "suggested_result",
+                "is_published",
+                "is_scored",
+            ),
+        }),
+        ("Imported from", {
+            "fields": ("external_source", "external_id", "suggested_at"),
+            "classes": ("collapse",),
+        }),
+        ("Points", {
+            "fields": (
+                "team_a_win_points",
+                "team_a_lose_points",
+                "team_b_win_points",
+                "team_b_lose_points",
+                "draw_win_points",
+                "draw_lose_points",
+            ),
+            "description": (
+                "Points awarded for a correct/incorrect pick. Defaults: win 10, lose -5. "
+                "The Draw points apply only to Football, Cricket and Hockey. "
+                "Enter 0 in both Draw fields if the match cannot end in a draw: "
+                "the Draw box is then hidden and users pick only Team A or Team B. "
+                "For Tennis, Badminton and Cricket, entering Team A win points fills the other "
+                "fields (100-point split); all stay editable."
+            ),
+        }),
+    )
+
+    def get_queryset(self, request):
+        # Past-deadline Scheduled matches show as Awaiting result here too.
+        sync_match_statuses()
+        return super().get_queryset(request)
+
+    def get_changeform_initial_data(self, request):
+        initial = super().get_changeform_initial_data(request)
+        # New matches start published; the admin can still untick it.
+        initial.setdefault("is_published", True)
+        return initial
+
+    @admin.action(description="Publish selected matches")
+    def publish_matches(self, request, queryset):
+        updated = queryset.update(is_published=True)
+        self.message_user(request, f"{updated} match(es) published.", messages.SUCCESS)
+
+    @admin.action(description="Unpublish selected matches")
+    def unpublish_matches(self, request, queryset):
+        updated = queryset.update(is_published=False)
+        self.message_user(request, f"{updated} match(es) unpublished.", messages.SUCCESS)
+
+    @admin.display(description="Suggested result")
+    def suggested_result(self, obj):
+        """The result reported by the import (see sync_external_matches),
+        waiting for an admin to confirm it or enter a different one."""
+        if obj.suggested_is_draw:
+            return "Draw"
+        return str(obj.suggested_winner) if obj.suggested_winner_id else "-"
+
+    @admin.action(description="Confirm suggested results (scores predictions)")
+    def confirm_suggested_results(self, request, queryset):
+        confirmed, failed = 0, []
+        for match in queryset.select_related("sport", "suggested_winner"):
+            try:
+                confirm_suggested_result(match)
+            except ValidationError as exc:
+                failed.append(f"{match}: {' '.join(exc.messages)}")
+            else:
+                confirmed += 1
+        if confirmed:
+            self.message_user(
+                request,
+                f"{confirmed} result(s) confirmed and predictions scored.",
+                messages.SUCCESS,
+            )
+        for error in failed:
+            self.message_user(request, error, messages.ERROR)
+
+    def save_model(self, request, obj, form, change):
+        super().save_model(request, obj, form, change)
+        # score_match reconciles in every direction (first scoring, winner
+        # correction, winner cleared) and safely no-ops for an unscored match
+        # with no winner, so it is called on every save.
+        if score_match(obj.pk):
+            messages.success(
+                request,
+                "Predictions scored using this match's configured points.",
+            )
+
+
+@admin.register(Prediction)
+class PredictionAdmin(admin.ModelAdmin):
+    list_display = ("user", "match", "choice", "points_awarded", "updated_at")
+    list_filter = ("choice",)
+    search_fields = ("user__username", "match__team_a__name", "match__team_b__name")
+    readonly_fields = (
+        "user",
+        "match",
+        "choice",
+        "points_awarded",
+        "created_at",
+        "updated_at",
+    )
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ScoreAdjustment)
+class ScoreAdjustmentAdmin(admin.ModelAdmin):
+    """Read-only audit trail backing the monthly leaderboard."""
+
+    list_display = ("user", "match", "delta", "created_at")
+    list_filter = ("created_at",)
+    search_fields = ("user__username", "match__team_a__name", "match__team_b__name")
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(ReferralSettings)
+class ReferralSettingsAdmin(admin.ModelAdmin):
+    """Singleton: credits per referral and the redemption threshold."""
+
+    fields = ("credits_per_referral", "redemption_threshold")
+
+    def has_add_permission(self, request):
+        return not ReferralSettings.objects.exists()
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(Referral)
+class ReferralAdmin(admin.ModelAdmin):
+    """Read-only audit trail; status is system-managed (see services.py)."""
+
+    list_display = ("referrer", "referred_user", "status", "created_at", "credited_at")
+    list_filter = ("status",)
+    search_fields = ("referrer__username", "referred_user__username")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(VoucherRedemption)
+class VoucherRedemptionAdmin(admin.ModelAdmin):
+    """Manual fulfillment workflow: an admin arranges the actual voucher
+    outside this system, then runs one of the actions below. `status` stays
+    read-only on the change form so it can only change through those
+    actions, never a stray manual edit."""
+
+    list_display = ("user", "credits_spent", "status", "requested_at", "resolved_at")
+    list_filter = ("status",)
+    search_fields = ("user__username",)
+    readonly_fields = ("user", "credits_spent", "status", "requested_at", "resolved_at")
+    fields = ("user", "credits_spent", "status", "admin_note", "requested_at", "resolved_at")
+    actions = ("mark_fulfilled", "reject_and_refund")
+
+    def has_add_permission(self, request):
+        return False
+
+    @admin.action(description="Mark selected as fulfilled")
+    def mark_fulfilled(self, request, queryset):
+        updated = sum(fulfill_redemption(r.pk) for r in queryset)
+        self.message_user(request, f"{updated} redemption(s) marked fulfilled.", messages.SUCCESS)
+
+    @admin.action(description="Reject selected and refund credits")
+    def reject_and_refund(self, request, queryset):
+        updated = sum(reject_redemption(r.pk) for r in queryset)
+        self.message_user(request, f"{updated} redemption(s) rejected and refunded.", messages.SUCCESS)
+
+
+@admin.register(CreditLedger)
+class CreditLedgerAdmin(admin.ModelAdmin):
+    """Read-only audit trail, same convention as ScoreAdjustmentAdmin."""
+
+    list_display = ("user", "delta", "reason", "created_at")
+    list_filter = ("reason",)
+    search_fields = ("user__username",)
+    date_hierarchy = "created_at"
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
+def _current_month_range():
+    """[start, end) for the current calendar month in the site's default
+    timezone -- same convention as the monthly leaderboard (views._monthly_profiles)."""
+    zone = timezone.get_default_timezone()
+    now = timezone.localtime(timezone.now(), zone)
+    start = datetime.datetime(now.year, now.month, 1, tzinfo=zone)
+    end = (
+        datetime.datetime(now.year + 1, 1, 1, tzinfo=zone)
+        if now.month == 12
+        else datetime.datetime(now.year, now.month + 1, 1, tzinfo=zone)
+    )
+    return start, end
+
+
+@admin.register(UserPredictionCount)
+class UserPredictionCountAdmin(admin.ModelAdmin):
+    """Read-only: predictions per user, this month and all-time."""
+
+    list_display = ("username", "email", "predictions_this_month", "predictions_all_time")
+    search_fields = ("user__username", "user__email")
+    ordering = ("user__username",)
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
+        return False
+
+    def get_queryset(self, request):
+        start, end = _current_month_range()
+        return (
+            super().get_queryset(request)
+            .select_related("user")
+            .annotate(
+                predictions_month_count=Count(
+                    "user__predictions",
+                    filter=Q(
+                        user__predictions__created_at__gte=start,
+                        user__predictions__created_at__lt=end,
+                    ),
+                ),
+                predictions_alltime_count=Count("user__predictions"),
+            )
+        )
+
+    @admin.display(description="Username", ordering="user__username")
+    def username(self, obj):
+        return obj.user.username
+
+    @admin.display(description="Email", ordering="user__email")
+    def email(self, obj):
+        return obj.user.email
+
+    @admin.display(description="Predictions (this month)", ordering="predictions_month_count")
+    def predictions_this_month(self, obj):
+        return obj.predictions_month_count
+
+    @admin.display(description="Predictions (all time)", ordering="predictions_alltime_count")
+    def predictions_all_time(self, obj):
+        return obj.predictions_alltime_count
+
+
+# "User Counts" reuses Profile's data as a proxy model, so it lands wherever
+# Django's default alphabetical admin ordering puts it. Voucher redemptions is
+# currently the last entry in this app, so pinning UserPredictionCount to the
+# end (a stable sort -- everything else keeps its existing order) puts it
+# directly below.
+_default_get_app_list = admin.site.get_app_list
+
+
+def _get_app_list_user_counts_last(self, request, app_label=None):
+    app_list = _default_get_app_list(request, app_label)
+    for app in app_list:
+        if app["app_label"] == "predictions":
+            app["models"].sort(key=lambda m: m["object_name"] == "UserPredictionCount")
+    return app_list
+
+
+admin.site.get_app_list = _get_app_list_user_counts_last.__get__(admin.site)
