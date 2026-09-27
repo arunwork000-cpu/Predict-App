@@ -2,3 +2,20 @@
 label[for="id_winner"] {
   font-weight: bold;
 }
+
+/* Match list: long team names wrap after about 15 letters instead of
+   widening the column. */
+#result_list .field-team_a,
+#result_list .field-team_b,
+#result_list .field-winner {
+  width: 15ch;
+  min-width: 15ch;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+/* Date on the first line, time beneath it; neither line breaks itself. */
+#result_list .field-start_time_display,
+#result_list .field-prediction_deadline_display {
+  white-space: nowrap;
+}

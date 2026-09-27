@@ -5,7 +5,7 @@ from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
-from django.utils import timezone
+from django.utils import formats, timezone
 from django.utils.html import format_html
 
 from .models import (
@@ -190,6 +190,21 @@ class PublishedFilter(admin.SimpleListFilter):
         return queryset
 
 
+class AddedByFilter(admin.SimpleListFilter):
+    title = "added by"
+    parameter_name = "added_by"
+
+    def lookups(self, request, model_admin):
+        return (("import", "Automatic import"), ("manual", "Manual"))
+
+    def queryset(self, request, queryset):
+        if self.value() == "import":
+            return queryset.exclude(external_id="")
+        if self.value() == "manual":
+            return queryset.filter(external_id="")
+        return queryset
+
+
 @admin.register(Match)
 class MatchAdmin(admin.ModelAdmin):
     form = MatchAdminForm
@@ -209,16 +224,18 @@ class MatchAdmin(admin.ModelAdmin):
         "sport",
         "event_name",
         "status",
-        "start_time",
-        "prediction_deadline",
+        "start_time_display",
+        "prediction_deadline_display",
         "winner",
         "is_draw",
         "suggested_result",
         "is_published",
         "is_scored",
+        "added_by",
     )
     list_filter = (
         PublishedFilter,
+        AddedByFilter,
         "sport",
         "status",
         SuggestedResultFilter,
@@ -233,24 +250,41 @@ class MatchAdmin(admin.ModelAdmin):
     change_list_template = "admin/predictions/match/change_list.html"
 
     def changelist_view(self, request, extra_context=None):
-        # Links for the "Filter by publication" row under the date hierarchy.
-        # Each keeps the other active filters and drops the page number.
-        current = request.GET.get(PublishedFilter.parameter_name, "")
+        # Links for the "Filter by ..." rows under the date hierarchy.
+        extra_context = {
+            **(extra_context or {}),
+            "publication_links": self._filter_links(
+                request,
+                PublishedFilter.parameter_name,
+                (("", "All"), ("yes", "Published"), ("no", "To be published")),
+            ),
+            "added_by_links": self._filter_links(
+                request,
+                AddedByFilter.parameter_name,
+                (("", "All"), ("import", "Automatic import"), ("manual", "Manual")),
+            ),
+        }
+        return super().changelist_view(request, extra_context=extra_context)
+
+    @staticmethod
+    def _filter_links(request, parameter_name, choices):
+        """One link per choice. Each keeps the other active filters and
+        drops the page number."""
+        current = request.GET.get(parameter_name, "")
         links = []
-        for value, title in (("", "All"), ("yes", "Published"), ("no", "To be published")):
+        for value, title in choices:
             params = request.GET.copy()
             params.pop("p", None)
-            params.pop(PublishedFilter.parameter_name, None)
+            params.pop(parameter_name, None)
             if value:
-                params[PublishedFilter.parameter_name] = value
+                params[parameter_name] = value
             query = params.urlencode()
             links.append({
                 "title": title,
                 "link": f"?{query}" if query else "?",
                 "selected": value == current,
             })
-        extra_context = {**(extra_context or {}), "publication_links": links}
-        return super().changelist_view(request, extra_context=extra_context)
+        return links
     # is_scored is managed by the scoring service. winner stays editable even
     # after scoring so a mistaken result can be corrected (score_match then
     # reconciles the points).
@@ -330,6 +364,32 @@ class MatchAdmin(admin.ModelAdmin):
         if obj.suggested_is_draw:
             return "Draw"
         return str(obj.suggested_winner) if obj.suggested_winner_id else "-"
+
+    @staticmethod
+    def _date_over_time(value):
+        """The date with the time on the line beneath it (same formats as
+        DATETIME_FORMAT in config/formats/en/formats.py)."""
+        if value is None:
+            return "-"
+        value = timezone.localtime(value)
+        return format_html(
+            "{}<br>{}",
+            formats.date_format(value, "DATE_FORMAT"),
+            formats.time_format(value, "H:i"),
+        )
+
+    @admin.display(description="Start time", ordering="start_time")
+    def start_time_display(self, obj):
+        return self._date_over_time(obj.start_time)
+
+    @admin.display(description="Prediction deadline", ordering="prediction_deadline")
+    def prediction_deadline_display(self, obj):
+        return self._date_over_time(obj.prediction_deadline)
+
+    @admin.display(description="Added by", ordering="external_id")
+    def added_by(self, obj):
+        """Imported matches carry the provider's event id; manual ones don't."""
+        return "Auto Import" if obj.external_id else "Manual"
 
     @admin.action(description="Confirm suggested results (scores predictions)")
     def confirm_suggested_results(self, request, queryset):
@@ -536,20 +596,39 @@ class UserPredictionCountAdmin(admin.ModelAdmin):
         return obj.predictions_alltime_count
 
 
-# "User Counts" reuses Profile's data as a proxy model, so it lands wherever
-# Django's default alphabetical admin ordering puts it. Voucher redemptions is
-# currently the last entry in this app, so pinning UserPredictionCount to the
-# end (a stable sort -- everything else keeps its existing order) puts it
-# directly below.
+# The PREDICTIONS menu in the admin sidebar follows this order instead of
+# Django's default alphabetical one. A model missing from the list goes last
+# (a stable sort keeps those in their alphabetical order).
+PREDICTIONS_MENU_ORDER = (
+    "Match",
+    "Team",
+    "TeamAlias",
+    "Sport",
+    "Profile",
+    "UserPredictionCount",
+    "Prediction",
+    "ScoreAdjustment",
+    "Referral",
+    "ReferralSettings",
+    "CreditLedger",
+    "VoucherRedemption",
+)
+
 _default_get_app_list = admin.site.get_app_list
 
 
-def _get_app_list_user_counts_last(self, request, app_label=None):
+def _get_app_list_in_menu_order(self, request, app_label=None):
     app_list = _default_get_app_list(request, app_label)
     for app in app_list:
         if app["app_label"] == "predictions":
-            app["models"].sort(key=lambda m: m["object_name"] == "UserPredictionCount")
+            app["models"].sort(
+                key=lambda m: (
+                    PREDICTIONS_MENU_ORDER.index(m["object_name"])
+                    if m["object_name"] in PREDICTIONS_MENU_ORDER
+                    else len(PREDICTIONS_MENU_ORDER)
+                )
+            )
     return app_list
 
 
-admin.site.get_app_list = _get_app_list_user_counts_last.__get__(admin.site)
+admin.site.get_app_list = _get_app_list_in_menu_order.__get__(admin.site)

@@ -3633,7 +3633,68 @@ class AdminDateFormatTests(TestCase):
         when = datetime(2026, 3, 10, 10, 0, tzinfo=dt_timezone.utc)
         future_match(start_time=when, prediction_deadline=when)
         response = self.client.get(reverse("admin:predictions_match_changelist"))
-        self.assertContains(response, "10-Mar-2026, 15:30")
+        # The time sits on the line beneath the date.
+        self.assertContains(response, "10-Mar-2026<br>15:30")
+
+
+class AdminAddedByFilterTests(TestCase):
+    """The match list tells imported matches apart from manual ones."""
+
+    def setUp(self):
+        self.client.force_login(
+            User.objects.create_superuser("boss", password="pass12345")
+        )
+        future_match(event_name="Typed in by hand")
+        future_match(
+            event_name="From the feed", external_source="fake", external_id="e1"
+        )
+        self.url = reverse("admin:predictions_match_changelist")
+
+    def test_filter_manual(self):
+        response = self.client.get(self.url, {"added_by": "manual"})
+        self.assertContains(response, "Typed in by hand")
+        self.assertNotContains(response, "From the feed")
+
+    def test_filter_import(self):
+        response = self.client.get(self.url, {"added_by": "import"})
+        self.assertContains(response, "From the feed")
+        self.assertNotContains(response, "Typed in by hand")
+
+    def test_column_and_filter_row(self):
+        response = self.client.get(self.url)
+        self.assertContains(response, "Auto Import")
+        self.assertContains(response, "Filter by added by")
+
+
+class AdminMenuOrderTests(TestCase):
+    """The PREDICTIONS admin menu lists its models in a fixed order."""
+
+    def test_menu_order(self):
+        from django.contrib.admin import site
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/admin/")
+        request.user = User.objects.create_superuser("boss", password="pass12345")
+        app = next(
+            a for a in site.get_app_list(request) if a["app_label"] == "predictions"
+        )
+        self.assertEqual(
+            [m["name"] for m in app["models"]],
+            [
+                "Matches",
+                "Teams",
+                "Team name aliases",
+                "Sports",
+                "Profiles",
+                "User Counts",
+                "Predictions",
+                "Score adjustments",
+                "Referrals",
+                "Referral settings",
+                "Credit ledgers",
+                "Voucher redemptions",
+            ],
+        )
 
 
 class LoseDrawLabelTests(TestCase):

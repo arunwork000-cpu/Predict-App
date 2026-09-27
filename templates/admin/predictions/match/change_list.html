@@ -8,4 +8,10 @@
 {% if choice.selected %}<strong>{{ choice.title }}</strong>{% else %}<a href="{{ choice.link }}">{{ choice.title }}</a>{% endif %}
 {% endfor %}
 </nav>
+<nav class="toplinks" aria-labelledby="added-by-filter-label">
+<span id="added-by-filter-label">Filter by added by</span>
+{% for choice in added_by_links %}
+{% if choice.selected %}<strong>{{ choice.title }}</strong>{% else %}<a href="{{ choice.link }}">{{ choice.title }}</a>{% endif %}
+{% endfor %}
+</nav>
 {% endblock %}
