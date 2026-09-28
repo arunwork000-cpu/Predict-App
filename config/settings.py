@@ -113,6 +113,7 @@ TEMPLATES = [
                 'django.contrib.messages.context_processors.messages',
                 'predictions.context_processors.user_points',
                 'predictions.context_processors.public_nav',
+                'predictions.context_processors.google_login',
             ],
         },
     },
@@ -241,6 +242,17 @@ else:
 # Resend when RESEND_API_KEY is set.
 DEFAULT_FROM_EMAIL = env(
     'DEFAULT_FROM_EMAIL', default='Sports Predictions <noreply@localhost>'
+)
+
+
+# Google sign-in (predictions/google_auth.py)
+
+# OAuth client from Google Cloud Console (type "Web application"), with
+# redirect URI https://<host>/accounts/google/callback/. Unset = the
+# "Continue with Google" button is hidden and its URLs return 404.
+GOOGLE_CLIENT_ID = env('GOOGLE_CLIENT_ID', default='').strip().strip('"\'').strip()
+GOOGLE_CLIENT_SECRET = (
+    env('GOOGLE_CLIENT_SECRET', default='').strip().strip('"\'').strip()
 )
 
 

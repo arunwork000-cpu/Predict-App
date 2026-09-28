@@ -70,11 +70,21 @@ class ProfileAdmin(admin.ModelAdmin):
     # country/state stay editable (not in readonly_fields) so an admin can
     # correct a legacy account that has none, or fix a typo. points/credits
     # and referral_code are system-managed -- see services.py.
-    list_display = ("user", "points", "credits", "referral_code", "age", "state", "country")
+    list_display = (
+        "user", "points", "credits", "referral_code", "age", "state", "country",
+        "uses_google",
+    )
     list_filter = ("country",)
     search_fields = ("user__username", "state", "country", "referral_code")
-    readonly_fields = ("user", "points", "credits", "referral_code")
-    fields = ("user", "points", "credits", "referral_code", "age", "country", "state")
+    readonly_fields = ("user", "points", "credits", "referral_code", "google_sub")
+    fields = (
+        "user", "points", "credits", "referral_code", "age", "country", "state",
+        "google_sub",
+    )
+
+    @admin.display(boolean=True, description="Google")
+    def uses_google(self, obj):
+        return bool(obj.google_sub)
 
 
 def _int_or_none(value):
