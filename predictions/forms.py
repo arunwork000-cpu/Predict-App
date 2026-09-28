@@ -112,6 +112,39 @@ def unique_email(email, exclude_user=None):
     return email
 
 
+class LocationForm(forms.ModelForm):
+    """Optional Country / State on My Account, shown on the leaderboard.
+
+    Mainly for Google sign-ups, who skip the registration form. Both may be
+    left blank; a state needs its country, as on the registration form.
+    """
+
+    country = forms.ChoiceField(
+        choices=[("", "Select a country")] + COUNTRY_CHOICES,
+        label="Country",
+        required=False,
+    )
+    state = forms.ChoiceField(
+        choices=[("", "Select a country first")] + STATE_CHOICES,
+        label="State / Province / Region",
+        required=False,
+    )
+
+    class Meta:
+        model = Profile
+        fields = ("country", "state")
+
+    def clean(self):
+        cleaned_data = super().clean()
+        country = cleaned_data.get("country")
+        state = cleaned_data.get("state")
+        if state and state not in states_for(country):
+            self.add_error(
+                "state", "Select a state that belongs to the chosen country."
+            )
+        return cleaned_data
+
+
 class AddEmailForm(forms.Form):
     """Asks a logged-in user with no email on file for one."""
 

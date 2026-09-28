@@ -4698,3 +4698,226 @@ class SyncExternalMatchesCommandTests(TestCase):
         with mock.patch(f"{self.COMMAND_MODULE}.get_providers", return_value=[]):
             with self.assertRaises(CommandError):
                 call_command("sync_external_matches", "--results")
+
+
+def google_id_token(**overrides):
+    claims = {
+        "iss": "https://accounts.google.com",
+        "aud": "test-client-id",
+        "sub": "g-123",
+        "email": "Fan@Example.com",
+        "email_verified": True,
+        "name": "Arun Kumar",
+        "exp": int(timezone.now().timestamp()) + 3600,
+    }
+    claims.update(overrides)
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
+    return f"header.{payload.decode()}.signature"
+
+
+def google_token_response(status=200, **claims):
+    response = mock.Mock(status_code=status, text="")
+    response.json.return_value = {"id_token": google_id_token(**claims)}
+    return response
+
+
+@override_settings(
+    GOOGLE_CLIENT_ID="test-client-id", GOOGLE_CLIENT_SECRET="test-secret"
+)
+class GoogleSignInTests(TestCase):
+    def _start(self, **data):
+        response = self.client.post(reverse("google_start"), data)
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("https://accounts.google.com/"))
+        return self.client.session["google_oauth"]["state"]
+
+    def _callback(self, state=None, **claims):
+        with mock.patch(
+            "predictions.google_auth.requests.post",
+            return_value=google_token_response(**claims),
+        ) as post:
+            response = self.client.get(
+                reverse("google_callback"), {"state": state, "code": "abc"}
+            )
+        return response, post
+
+    def test_new_user_with_terms_is_created_and_logged_in(self):
+        referrer = make_user("referrer")
+        code = referrer.profile.referral_code
+        state = self._start(accept_terms="on", ref=code)
+
+        response, post = self._callback(state)
+
+        self.assertRedirects(response, reverse("match_list"))
+        user = User.objects.get(email="fan@example.com")
+        self.assertEqual(user.username, "ArunKumar")
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual(user.profile.google_sub, "g-123")
+        self.assertEqual(Referral.objects.get(referred_user=user).referrer, referrer)
+        self.assertEqual(int(self.client.session["_auth_user_id"]), user.pk)
+        self.assertEqual(post.call_args.kwargs["data"]["code"], "abc")
+
+    def test_username_clash_gets_a_number(self):
+        make_user("arunkumar")
+        state = self._start(accept_terms="on")
+        self._callback(state)
+        self.assertTrue(User.objects.filter(username="ArunKumar2").exists())
+
+    def test_blank_name_falls_back_to_player(self):
+        state = self._start(accept_terms="on")
+        self._callback(state, name="")
+        self.assertTrue(User.objects.filter(username="Player").exists())
+
+    def test_new_user_without_terms_is_sent_to_register_then_finishes(self):
+        state = self._start()
+        response, _ = self._callback(state)
+
+        self.assertRedirects(response, reverse("register"))
+        self.assertFalse(User.objects.filter(email="fan@example.com").exists())
+        page = self.client.get(reverse("register"))
+        self.assertContains(page, "fan@example.com")
+
+        # Ticking the box finishes signup without another trip to Google.
+        response = self.client.post(reverse("google_start"), {"accept_terms": "on"})
+        self.assertRedirects(response, reverse("match_list"))
+        user = User.objects.get(email="fan@example.com")
+        self.assertEqual(user.profile.google_sub, "g-123")
+        self.assertNotIn("google_pending", self.client.session)
+
+    def test_existing_user_is_linked_by_email(self):
+        alice = make_user("alice", email="fan@example.com", password="pass12345")
+        state = self._start()  # from Log in: no terms needed for an account
+        response, _ = self._callback(state)
+        self.assertRedirects(response, reverse("match_list"))
+        alice.profile.refresh_from_db()
+        self.assertEqual(alice.profile.google_sub, "g-123")
+        self.assertEqual(int(self.client.session["_auth_user_id"]), alice.pk)
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_existing_user_is_found_by_google_id_after_email_change(self):
+        alice = make_user("alice", email="new@example.com")
+        Profile.objects.filter(user=alice).update(google_sub="g-123")
+        state = self._start()
+        self._callback(state, email="old@example.com")
+        self.assertEqual(int(self.client.session["_auth_user_id"]), alice.pk)
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_next_is_followed_after_login(self):
+        make_user("alice", email="fan@example.com")
+        state = self._start(next="/leaderboard/")
+        response, _ = self._callback(state)
+        self.assertRedirects(response, "/leaderboard/")
+
+    def test_offsite_next_is_ignored(self):
+        make_user("alice", email="fan@example.com")
+        state = self._start(next="https://evil.example/")
+        response, _ = self._callback(state)
+        self.assertRedirects(response, reverse("match_list"))
+
+    def test_state_mismatch_is_rejected(self):
+        self._start(accept_terms="on")
+        response, post = self._callback("wrong-state")
+        self.assertRedirects(response, reverse("login"))
+        post.assert_not_called()
+        self.assertFalse(User.objects.exists())
+
+    def test_bad_tokens_are_rejected(self):
+        for claims in (
+            {"email_verified": False},
+            {"aud": "someone-else"},
+            {"iss": "https://evil.example"},
+            {"exp": 1},
+        ):
+            with self.subTest(claims=claims):
+                state = self._start(accept_terms="on")
+                response, _ = self._callback(state, **claims)
+                self.assertRedirects(response, reverse("login"))
+                self.assertFalse(User.objects.exists())
+
+    def test_cancelled_at_google(self):
+        self._start()
+        response = self.client.get(reverse("google_callback"), {"error": "access_denied"})
+        self.assertRedirects(response, reverse("login"))
+
+    def test_inactive_user_is_refused(self):
+        make_user("alice", email="fan@example.com", is_active=False)
+        state = self._start()
+        response, _ = self._callback(state)
+        self.assertRedirects(response, reverse("login"))
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_buttons_show_on_login_and_register(self):
+        self.assertContains(self.client.get(reverse("login")), "Continue with Google")
+        register = self.client.get(reverse("register") + "?ref=ABC")
+        self.assertContains(register, "Continue with Google")
+        self.assertContains(register, 'name="accept_terms" id="google_accept_terms"')
+        self.assertContains(register, '<input type="hidden" name="ref" value="ABC">')
+
+    def test_password_change_page_explains_google_accounts(self):
+        user = User.objects.create_user("g", email="g@example.com")
+        self.client.force_login(user)
+        response = self.client.get(reverse("password_change"))
+        self.assertContains(response, "You sign in with Google")
+
+
+class AccountLocationTests(TestCase):
+    """Optional Country / State on My Account (for Google sign-ups)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("g", email="g@example.com")
+        self.client.force_login(self.user)
+
+    def _save(self, **data):
+        return self.client.post(reverse("my_account"), data)
+
+    def test_card_is_shown_and_prefilled(self):
+        Profile.objects.filter(user=self.user).update(country="India", state="Kerala")
+        response = self.client.get(reverse("my_account"))
+        self.assertContains(response, "Your location")
+        self.assertEqual(response.context["location_form"]["state"].value(), "Kerala")
+
+    def test_saving_updates_profile_and_leaderboard(self):
+        response = self._save(country="India", state="Kerala")
+        self.assertRedirects(response, reverse("my_account"))
+        self.user.profile.refresh_from_db()
+        self.assertEqual(
+            (self.user.profile.country, self.user.profile.state), ("India", "Kerala")
+        )
+        self.assertContains(self.client.get(reverse("leaderboard")), "Kerala")
+
+    def test_both_may_be_left_blank(self):
+        Profile.objects.filter(user=self.user).update(country="India", state="Kerala")
+        response = self._save(country="", state="")
+        self.assertRedirects(response, reverse("my_account"))
+        self.user.profile.refresh_from_db()
+        self.assertEqual((self.user.profile.country, self.user.profile.state), ("", ""))
+
+    def test_state_must_belong_to_the_country(self):
+        other_country = next(c for c in STATES_BY_COUNTRY if c != "India")
+        for data in (
+            {"country": other_country, "state": "Kerala"},
+            {"country": "", "state": "Kerala"},
+        ):
+            with self.subTest(data=data):
+                response = self._save(**data)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("state", response.context["location_form"].errors)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.state, "")
+
+    def test_unknown_country_is_rejected(self):
+        response = self._save(country="Atlantis", state="")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("country", response.context["location_form"].errors)
+
+    def test_change_password_button_hidden_for_google_only_accounts(self):
+        response = self.client.get(reverse("my_account"))
+        self.assertNotContains(response, reverse("password_change"))
+
+
+@override_settings(GOOGLE_CLIENT_ID="", GOOGLE_CLIENT_SECRET="")
+class GoogleSignInDisabledTests(TestCase):
+    def test_no_button_and_urls_404(self):
+        self.assertNotContains(self.client.get(reverse("login")), "Continue with Google")
+        self.assertEqual(self.client.post(reverse("google_start")).status_code, 404)
+        self.assertEqual(self.client.get(reverse("google_callback")).status_code, 404)

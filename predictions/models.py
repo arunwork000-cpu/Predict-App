@@ -60,6 +60,15 @@ class Profile(models.Model):
         editable=False,
         default="",
     )
+    # Google's permanent account ID ("sub") once the user has signed in with
+    # Google; null for accounts that never have. See google_auth.py.
+    google_sub = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        unique=True,
+        editable=False,
+    )
 
     class Meta:
         ordering = ["-points", "user__username"]

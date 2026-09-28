@@ -4,6 +4,7 @@
 <div class="row justify-content-center">
   <div class="col-md-5">
     <h1 class="h3 mb-3">Log in</h1>
+    {% include "registration/_google_button.html" %}
     <form method="post" class="card card-body">
       {# csrf_token is required on every POST form. #}
       {% csrf_token %}

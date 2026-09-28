@@ -1,9 +1,13 @@
 import datetime
 import json
+import logging
+import secrets
 
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
+from django.contrib.auth.models import User
+from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncMonth
 from django.http import Http404, HttpResponse
@@ -11,9 +15,11 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
+from django.views.decorators.http import require_POST
 
+from . import google_auth
 from .constants import DEFAULT_SPORT_SLUG, DRAW_SPORTS, SPORT_SLUGS, SUPPORTED_SPORTS
-from .forms import AddEmailForm, PredictionForm, RegistrationForm
+from .forms import AddEmailForm, LocationForm, PredictionForm, RegistrationForm
 from .locations import STATES_BY_COUNTRY
 from .models import (
     Match,
@@ -31,6 +37,8 @@ from .services import (
     redeem_credits,
     sync_match_statuses,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _attach_user_picks(request, matches):
@@ -231,9 +239,18 @@ def my_predictions(request):
 @login_required
 def my_account(request):
     """Referral link, credit wallet and redemption history for the current
-    user. `profile.credits` is entirely separate from `profile.points`
-    (leaderboard) -- see Profile/CreditLedger in models.py."""
+    user, plus the optional Country / State shown on the leaderboard (POST
+    saves those). `profile.credits` is entirely separate from
+    `profile.points` (leaderboard) -- see Profile/CreditLedger in models.py."""
     profile = request.user.profile
+    if request.method == "POST":
+        location_form = LocationForm(request.POST, instance=profile)
+        if location_form.is_valid():
+            location_form.save()
+            messages.success(request, "Your location has been saved.")
+            return redirect("my_account")
+    else:
+        location_form = LocationForm(instance=profile)
     settings_row = ReferralSettings.load()
     threshold = settings_row.redemption_threshold
     referral_link = request.build_absolute_uri(
@@ -275,6 +292,8 @@ def my_account(request):
             "all_time_rank": all_time_rank,
             "monthly_points": monthly_points,
             "monthly_rank": monthly_rank,
+            "location_form": location_form,
+            "states_by_country_json": json.dumps(STATES_BY_COUNTRY),
         },
     )
 
@@ -466,11 +485,164 @@ def register(request):
         # A referral link looks like /accounts/register/?ref=<code>; prefill
         # the field so the visitor doesn't have to retype it.
         form = RegistrationForm(initial={"referral_code": request.GET.get("ref", "")})
+    pending = request.session.get(GOOGLE_PENDING_KEY)
     return render(
         request,
         "predictions/register.html",
-        {"form": form, "states_by_country_json": json.dumps(STATES_BY_COUNTRY)},
+        {
+            "form": form,
+            "states_by_country_json": json.dumps(STATES_BY_COUNTRY),
+            "ref": request.GET.get("ref", ""),
+            "google_pending_email": pending["identity"]["email"] if pending else "",
+        },
     )
+
+
+# Session keys for the Google sign-in flow.
+GOOGLE_FLOW_KEY = "google_oauth"
+# A verified Google identity with no account yet, waiting for the visitor to
+# accept the Terms on the Register page (they started from Log in).
+GOOGLE_PENDING_KEY = "google_pending"
+
+
+def _safe_next(request, url):
+    if url and url_has_allowed_host_and_scheme(
+        url, allowed_hosts={request.get_host()}, require_https=request.is_secure()
+    ):
+        return url
+    return ""
+
+
+@require_POST
+def google_start(request):
+    """Send the visitor to Google's account chooser.
+
+    The form on the Log in / Register page posts here; the Register one also
+    carries the required accept_terms checkbox and any referral code, which
+    are kept in the session until Google sends the visitor back.
+    """
+    if not google_auth.is_enabled():
+        raise Http404
+    if request.user.is_authenticated:
+        return redirect("match_list")
+    accept_terms = request.POST.get("accept_terms") == "on"
+    ref = request.POST.get("ref", "").strip().upper()[:10]
+    next_url = _safe_next(request, request.POST.get("next", ""))
+
+    # Google already vouched for this visitor (see google_callback); only
+    # the Terms were missing, so finish without another trip to Google.
+    pending = request.session.get(GOOGLE_PENDING_KEY)
+    if pending and accept_terms:
+        return _google_login(
+            request,
+            pending["identity"],
+            accept_terms=True,
+            ref=ref or pending.get("ref", ""),
+            next_url=next_url or pending.get("next", ""),
+        )
+
+    state = secrets.token_urlsafe(32)
+    request.session[GOOGLE_FLOW_KEY] = {
+        "state": state,
+        "accept_terms": accept_terms,
+        "ref": ref,
+        "next": next_url,
+    }
+    return redirect(google_auth.build_auth_url(request, state))
+
+
+def google_callback(request):
+    """Where Google sends the visitor back after they pick an account."""
+    if not google_auth.is_enabled():
+        raise Http404
+    flow = request.session.pop(GOOGLE_FLOW_KEY, None)
+    if request.GET.get("error"):
+        messages.info(request, "Google sign-in was cancelled.")
+        return redirect("login")
+    state = request.GET.get("state", "")
+    code = request.GET.get("code", "")
+    if not flow or not code or not secrets.compare_digest(flow["state"], state):
+        messages.error(request, "Google sign-in expired or was invalid. Please try again.")
+        return redirect("login")
+    try:
+        identity = google_auth.exchange_code(request, code)
+    except google_auth.GoogleAuthError as exc:
+        logger.warning("Google sign-in failed: %s", exc)
+        messages.error(request, "We couldn't sign you in with Google. Please try again.")
+        return redirect("login")
+    return _google_login(
+        request,
+        identity,
+        accept_terms=flow["accept_terms"],
+        ref=flow["ref"],
+        next_url=flow["next"],
+    )
+
+
+def _google_login(request, identity, *, accept_terms, ref, next_url):
+    """Log in (creating the account if needed) the owner of a verified
+    Google identity: matched by Google ID first, then by email."""
+    profile = (
+        Profile.objects.filter(google_sub=identity["sub"]).select_related("user").first()
+    )
+    user = profile.user if profile else None
+    created = False
+
+    if user is None:
+        by_email = list(User.objects.filter(email__iexact=identity["email"])[:2])
+        if len(by_email) > 1:
+            # Legacy data: two accounts share this email. Don't guess.
+            messages.error(
+                request,
+                "More than one account uses this email. Please log in with "
+                "your username and password.",
+            )
+            return redirect("login")
+        if by_email:
+            # Google verified the address, so it's the same person: link it.
+            user = by_email[0]
+            profile, _ = Profile.objects.get_or_create(user=user)
+            profile.google_sub = identity["sub"]
+            profile.save(update_fields=["google_sub"])
+
+    if user is None:
+        if not accept_terms:
+            request.session[GOOGLE_PENDING_KEY] = {
+                "identity": identity,
+                "ref": ref,
+                "next": next_url,
+            }
+            messages.info(
+                request,
+                "Almost there: tick the box to agree to the Terms, then "
+                "continue with Google to create your account.",
+            )
+            return redirect("register")
+        with transaction.atomic():
+            # password=None gives an unusable password: Google-only login.
+            user = User.objects.create_user(
+                username=google_auth.generate_username(identity["name"]),
+                email=identity["email"],
+                password=None,
+            )
+            profile = user.profile  # created by the post_save signal
+            profile.google_sub = identity["sub"]
+            profile.save(update_fields=["google_sub"])
+            apply_referral_code(user, ref)
+        created = True
+
+    request.session.pop(GOOGLE_PENDING_KEY, None)
+    if not user.is_active:
+        messages.error(request, "This account has been deactivated.")
+        return redirect("login")
+    login(request, user, backend="django.contrib.auth.backends.ModelBackend")
+    if created:
+        messages.success(
+            request,
+            f"Welcome, {user.username}. You can now make predictions. To show "
+            "your state and country on the leaderboard, add them in My Account.",
+        )
+    return redirect(next_url or "match_list")
 
 
 def terms(request):

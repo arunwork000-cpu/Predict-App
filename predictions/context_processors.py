@@ -1,5 +1,6 @@
 from django.utils import timezone
 
+from . import google_auth
 from .constants import SUPPORTED_SPORTS
 from .models import Match
 
@@ -9,6 +10,11 @@ def user_points(request):
         profile = getattr(request.user, "profile", None)
         return {"user_points": profile.points if profile else 0}
     return {"user_points": None}
+
+
+def google_login(request):
+    """Whether to show the "Continue with Google" button."""
+    return {"google_login_enabled": google_auth.is_enabled()}
 
 
 def public_nav(request):
