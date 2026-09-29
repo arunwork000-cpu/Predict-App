@@ -632,6 +632,50 @@ class TermsAndPrivacyTests(TestCase):
         self.assertFalse(User.objects.filter(username="newuser").exists())
 
 
+class InstallableAppTests(TestCase):
+    """PWA files: manifest, service worker, offline page, and the menu."""
+
+    def test_manifest(self):
+        response = self.client.get(reverse("web_manifest"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/manifest+json")
+        manifest = json.loads(response.content)
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual(
+            {icon["sizes"] for icon in manifest["icons"]}, {"192x192", "512x512"}
+        )
+        self.assertIn("maskable", [icon["purpose"] for icon in manifest["icons"]])
+
+    def test_service_worker_served_from_root_uncached(self):
+        response = self.client.get("/sw.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/javascript")
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertContains(response, reverse("offline"))
+
+    def test_offline_page(self):
+        response = self.client.get(reverse("offline"))
+        self.assertContains(response, "You're offline")
+
+    def test_pwa_files_reachable_for_user_without_email(self):
+        make_user("old", email="", password="StrongPass123")
+        self.client.login(username="old", password="StrongPass123")
+        for name in ("web_manifest", "service_worker", "offline"):
+            with self.subTest(name=name):
+                self.assertEqual(self.client.get(reverse(name)).status_code, 200)
+
+    def test_pages_link_manifest_and_show_menu_without_hamburger(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, 'rel="manifest" href="%s"' % reverse("web_manifest"))
+        self.assertContains(response, "data-pwa-install")
+        self.assertNotContains(response, "navbar-toggler")
+        self.assertNotContains(response, "navbar-collapse")
+        # Phones get the short label so the menu wraps onto fewer rows.
+        self.assertContains(response, '<span class="d-lg-none">Closed</span>')
+        # A multi-line {# #} comment isn't a comment -- it renders as text.
+        self.assertNotContains(response, "{#")
+
+
 class RegistrationLocationTests(TestCase):
     """Country/State are required, dropdown-only, and cross-validated."""
 

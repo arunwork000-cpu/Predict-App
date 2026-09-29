@@ -1,9 +1,17 @@
-<!DOCTYPE html>
+{% load static %}<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{% block title %}Predict{% endblock %} · Sports Predictions</title>
+  <link rel="manifest" href="{% url 'web_manifest' %}">
+  <meta name="theme-color" content="#0B3D2E">
+  <link rel="icon" type="image/png" sizes="32x32" href="{% static 'predictions/icons/favicon-32.png' %}">
+  <link rel="apple-touch-icon" href="{% static 'predictions/icons/apple-touch-icon.png' %}">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="WinSports">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <script>
     // Tell the server the visitor's time zone so times render locally.
     (function () {
@@ -24,6 +32,7 @@
     })();
   </script>
   <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="{% static 'predictions/pwa.js' %}" data-sw-url="{% url 'service_worker' %}" defer></script>
   <style>
     form input:not([type=hidden]):not([type=radio]):not([type=checkbox]):not([type=submit]),
     form select, form textarea {
@@ -205,73 +214,126 @@
     .navbar-brand-green {
       background-color: #0B3D2E;
     }
+    .nav-row-account {
+      column-gap: .5rem;
+    }
+    /* Phones and tablets: no hamburger -- every menu item stays visible,
+       sports and main pages wrap at full size, then the account links. */
+    @media (max-width: 991.98px) {
+      .navbar-brand-green .navbar-nav .nav-link {
+        padding: .35rem .6rem;
+      }
+      .navbar-brand-green .navbar-nav .nav-link.active {
+        text-decoration: underline;
+        text-underline-offset: .3em;
+      }
+      .nav-row-account {
+        font-size: .875rem;
+        margin-top: .35rem;
+        padding-top: .35rem;
+        border-top: 1px solid rgba(255, 255, 255, .2);
+      }
+    }
+    /* "Install app" banner, shown by pwa.js on phones only. */
+    .pwa-banner {
+      position: fixed;
+      left: 12px;
+      right: 12px;
+      bottom: 12px;
+      z-index: 1030;
+      display: flex;
+      align-items: center;
+      gap: .75rem;
+      padding: .6rem .75rem;
+      color: #fff;
+      background: #0B3D2E;
+      border-radius: .75rem;
+      box-shadow: 0 6px 20px rgba(0, 0, 0, .25);
+    }
+    .pwa-banner img {
+      width: 40px;
+      height: 40px;
+      border-radius: 9px;
+    }
+    body.pwa-banner-open {
+      padding-bottom: 80px;
+    }
+    @media (min-width: 992px) {
+      .pwa-banner {
+        display: none;
+      }
+      body.pwa-banner-open {
+        padding-bottom: 0;
+      }
+    }
   </style>
 </head>
 <body class="bg-light">
-  <nav class="navbar navbar-expand-lg navbar-dark navbar-brand-green mb-4">
-    <div class="container">
-      <button class="navbar-toggler" type="button" data-bs-toggle="collapse" data-bs-target="#nav">
-        <span class="navbar-toggler-icon"></span>
-      </button>
-      <div class="collapse navbar-collapse" id="nav">
-        <ul class="navbar-nav me-auto flex-wrap">
-          {% for sport in nav_sports %}
-            <li class="nav-item">
-              <a class="nav-link lh-sm {% if sport.slug == sport_slug %}active{% endif %}"
-                 href="{% url 'sport_matches' sport.slug %}">
-                {{ sport.name }}
-                {% if sport.has_open %}
-                  <span class="badge text-bg-success d-block predict-now-badge">Predict now</span>
-                {% endif %}
-              </a>
-            </li>
-          {% endfor %}
+  <nav class="navbar navbar-expand navbar-dark navbar-brand-green mb-4">
+    <div class="container flex-column flex-lg-row align-items-stretch align-items-lg-center">
+      {# Sports and main pages share one list so phones wrap it at full size. #}
+      <ul class="navbar-nav flex-wrap me-lg-auto">
+        {% for sport in nav_sports %}
           <li class="nav-item">
-            <a class="nav-link {% if request.resolver_match.url_name == 'closed_matches' %}active{% endif %}"
-               href="{% url 'closed_matches' %}">Closed Matches</a>
+            <a class="nav-link lh-sm {% if sport.slug == sport_slug %}active{% endif %}"
+               href="{% url 'sport_matches' sport.slug %}">
+              {{ sport.name }}
+              {% if sport.has_open %}
+                <span class="badge text-bg-success d-block predict-now-badge">Predict now</span>
+              {% endif %}
+            </a>
           </li>
-          {% if user.is_authenticated %}
-            <li class="nav-item">
-              <a class="nav-link" href="{% url 'my_predictions' %}">My Predictions</a>
-            </li>
-          {% endif %}
+        {% endfor %}
+        <li class="nav-item">
+          <a class="nav-link {% if request.resolver_match.url_name == 'closed_matches' %}active{% endif %}"
+             href="{% url 'closed_matches' %}"><span class="d-lg-none">Closed</span><span class="d-none d-lg-inline">Closed Matches</span></a>
+        </li>
+        {% if user.is_authenticated %}
           <li class="nav-item">
-            <a class="nav-link {% if request.resolver_match.url_name == 'leaderboard' %}active{% endif %}"
-               href="{% url 'leaderboard' %}">Leaderboard</a>
+            <a class="nav-link {% if request.resolver_match.url_name == 'my_predictions' %}active{% endif %}"
+               href="{% url 'my_predictions' %}"><span class="d-lg-none">Predictions</span><span class="d-none d-lg-inline">My Predictions</span></a>
           </li>
-        </ul>
-        <ul class="navbar-nav align-items-lg-center gap-lg-2">
-          {% if user.is_authenticated %}
-            <li class="nav-item">
-              <span class="navbar-text text-white-50">{{ user.username }}</span>
-            </li>
-            <li class="nav-item">
-              <span class="badge text-bg-warning">{{ user_points }} pts</span>
-            </li>
-            <li class="nav-item">
-              <a class="nav-link lh-sm {% if request.resolver_match.url_name == 'my_account' %}active{% endif %}"
-                 href="{% url 'my_account' %}">
-                My Account
-                <span class="badge text-bg-success d-block predict-now-badge">Redeem Credits</span>
-              </a>
-            </li>
-            <li class="nav-item">
-              {# Django logout is POST-only so we use a small form, not a link. #}
-              <form method="post" action="{% url 'logout' %}" class="d-inline">
-                {% csrf_token %}
-                <button type="submit" class="btn btn-outline-light btn-sm">Log out</button>
-              </form>
-            </li>
-          {% else %}
-            <li class="nav-item">
-              <a class="nav-link" href="{% url 'login' %}">Log in</a>
-            </li>
-            <li class="nav-item">
-              <a class="btn btn-primary btn-sm" href="{% url 'register' %}">Register</a>
-            </li>
-          {% endif %}
-        </ul>
-      </div>
+        {% endif %}
+        <li class="nav-item">
+          <a class="nav-link {% if request.resolver_match.url_name == 'leaderboard' %}active{% endif %}"
+             href="{% url 'leaderboard' %}">Leaderboard</a>
+        </li>
+      </ul>
+      <ul class="navbar-nav flex-wrap align-items-center nav-row-account">
+        {% if user.is_authenticated %}
+          <li class="nav-item">
+            <span class="navbar-text text-white-50">{{ user.username }}</span>
+          </li>
+          <li class="nav-item">
+            <span class="badge text-bg-warning">{{ user_points }} pts</span>
+          </li>
+          <li class="nav-item">
+            <a class="nav-link lh-sm {% if request.resolver_match.url_name == 'my_account' %}active{% endif %}"
+               href="{% url 'my_account' %}">
+              My Account
+              <span class="badge text-bg-success d-block predict-now-badge">Redeem Credits</span>
+            </a>
+          </li>
+          <li class="nav-item">
+            {# Django logout is POST-only so we use a small form, not a link. #}
+            <form method="post" action="{% url 'logout' %}" class="d-inline">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-outline-light btn-sm">Log out</button>
+            </form>
+          </li>
+        {% else %}
+          <li class="nav-item">
+            <a class="nav-link" href="{% url 'login' %}">Log in</a>
+          </li>
+          <li class="nav-item">
+            <a class="btn btn-primary btn-sm" href="{% url 'register' %}">Register</a>
+          </li>
+        {% endif %}
+        {# Shown by pwa.js when the browser can install the app. #}
+        <li class="nav-item" data-pwa-install-item hidden>
+          <button type="button" class="btn btn-success btn-sm" data-pwa-install>Install app</button>
+        </li>
+      </ul>
     </div>
   </nav>
 
@@ -293,6 +355,42 @@
     <a class="link-secondary" href="{% url 'privacy' %}">Privacy Policy</a>
     <div>Free-to-play · No real-money betting</div>
   </footer>
+
+  <div class="pwa-banner" id="pwa-banner" hidden>
+    <img src="{% static 'predictions/icons/icon-192.png' %}" alt="">
+    <div class="flex-grow-1 lh-sm">
+      <strong>Get the WinSports app</strong>
+      <div class="small text-white-50">Add it to your home screen</div>
+    </div>
+    <button type="button" class="btn btn-success btn-sm" data-pwa-install>Install</button>
+    <button type="button" class="btn-close btn-close-white" aria-label="Close" data-pwa-dismiss></button>
+  </div>
+
+  {# iPhone/iPad browsers have no install prompt; this shows the manual steps. #}
+  <div class="modal fade" id="pwa-ios-modal" tabindex="-1" aria-labelledby="pwa-ios-title" aria-hidden="true">
+    <div class="modal-dialog modal-dialog-centered">
+      <div class="modal-content">
+        <div class="modal-header">
+          <h2 class="modal-title fs-5" id="pwa-ios-title">Install WinSports</h2>
+          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+        </div>
+        <div class="modal-body">
+          <ol class="mb-0">
+            <li class="mb-2">
+              Tap the <strong>Share</strong> button
+              <svg width="16" height="18" viewBox="0 0 16 18" aria-hidden="true" style="vertical-align: -2px">
+                <path d="M8 1v11M4 5l4-4 4 4M2 9v7h12V9" fill="none" stroke="currentColor"
+                      stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+              in the browser bar.
+            </li>
+            <li class="mb-2">Scroll down and tap <strong>Add to Home Screen</strong>.</li>
+            <li>Tap <strong>Add</strong>. WinSports will appear on your home screen.</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>
