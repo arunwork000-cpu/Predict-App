@@ -21,7 +21,7 @@ from django.db import IntegrityError
 from django.db.models import ProtectedError
 from django.test import Client, RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import dateformat, timezone
 
 from .admin import MatchAdmin, VoucherRedemptionAdmin
 from .constants import SUPPORTED_SPORTS
@@ -1224,6 +1224,18 @@ class MyPredictionsViewTests(TestCase):
         self.assertContains(response, "Hit")
         self.assertContains(response, "+10")
 
+    def test_decided_row_shows_kickoff_date(self):
+        match = self._match("dated")
+        Prediction.objects.create(user=self.alice, match=match, choice="A")
+        self._score(match, "A")
+
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+
+        kickoff = timezone.localtime(match.start_time)
+        self.assertContains(response, "Kickoff Date")
+        self.assertContains(response, dateformat.format(kickoff, "N j, Y"))
+
     def test_incorrect_prediction_shows_miss_and_minus_five(self):
         match = self._match("miss")
         Prediction.objects.create(user=self.alice, match=match, choice="A")
@@ -1850,11 +1862,13 @@ class VoucherAnnouncementTests(TestCase):
 
 
 @mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
 class LeaderboardMedalTests(TestCase):
     """Gold/silver/bronze medal images next to the top three rows only.
 
-    The 50-prediction medal floor is switched off (start day 32 never comes),
-    so these rank-only tests pass on any day of the month.
+    The prediction-count medal floor is switched off on both boards (start
+    day 32 never comes, minimum 0), so these rank-only tests pass on any day
+    of the month.
     """
 
     @staticmethod
@@ -1950,6 +1964,64 @@ class LeaderboardMedalTests(TestCase):
             "gold.svg",
             "Gold medal — first place",
         )
+
+
+# Start day 32 never comes: the Monthly floor is off, so these tests also
+# prove the All-Time floor applies whatever the day of the month.
+@mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
+class AllTimeMedalEligibilityTests(TestCase):
+    """All-Time medals go to the top 3 among players with at least
+    MEDAL_MIN_PREDICTIONS predictions, on every day of the month."""
+
+    def setUp(self):
+        self.base_match = future_match()
+
+    def _player(self, username, points, predictions):
+        user = make_user(username, password="pass12345")
+        Profile.objects.filter(user=user).update(points=points)
+        base = self.base_match
+        matches = Match.objects.bulk_create(
+            Match(
+                sport=base.sport,
+                team_a=base.team_a,
+                team_b=base.team_b,
+                start_time=base.start_time,
+                prediction_deadline=base.prediction_deadline,
+                status=base.status,
+                is_published=True,
+            )
+            for _ in range(predictions)
+        )
+        Prediction.objects.bulk_create(
+            Prediction(user=user, match=match, choice="A") for match in matches
+        )
+        return user
+
+    def _medals(self):
+        response = self.client.get(reverse("leaderboard"))
+        return {
+            p.user.username: p.medal for p in response.context["all_time_profiles"]
+        }
+
+    def test_top_scorer_below_minimum_is_skipped(self):
+        self._player("casual", points=500, predictions=99)
+        self._player("first", points=300, predictions=100)
+        self._player("second", points=200, predictions=120)
+        self._player("third", points=100, predictions=100)
+
+        medals = self._medals()
+
+        self.assertIsNone(medals["casual"])
+        self.assertEqual(medals["first"], "gold")
+        self.assertEqual(medals["second"], "silver")
+        self.assertEqual(medals["third"], "bronze")
+
+    def test_note_is_shown_on_the_all_time_board(self):
+        content = self.client.get(reverse("leaderboard")).content.decode()
+        all_time = content[
+            content.index('id="leaderboard-all-time"'):content.index('id="leaderboard-monthly"')
+        ]
+        self.assertIn("Minimum of 100 Counts (Predictions)", all_time)
 
 
 def sport_match(sport_name, team_a_name="Team A", team_b_name="Team B", **kwargs):

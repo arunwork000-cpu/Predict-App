@@ -377,8 +377,8 @@ def _monthly_profiles(year, month):
     return profiles
 
 
-MEDAL_ELIGIBILITY_START_DAY = 21  # day-of-month the 50-prediction floor kicks in
-MEDAL_MIN_PREDICTIONS = 50
+MEDAL_ELIGIBILITY_START_DAY = 21  # day-of-month the 100-prediction floor kicks in
+MEDAL_MIN_PREDICTIONS = 100
 _MEDALS = ("gold", "silver", "bronze")
 
 
@@ -390,13 +390,13 @@ def _assign_medals_by_rank(profiles):
         profile.medal = medal
 
 
-def _assign_medals_by_eligibility(profiles, minimum):
-    """Top 3 by position *among those with >= minimum predictions this
-    month* get gold/silver/bronze; a higher-ranked but ineligible player is
-    skipped, not just left medal-less in their slot."""
+def _assign_medals_by_eligibility(profiles, minimum, count_attr="monthly_predictions_count"):
+    """Top 3 by position *among those with >= minimum predictions on this
+    board* (read from `count_attr`) get gold/silver/bronze; a higher-ranked
+    but ineligible player is skipped, not just left medal-less in their slot."""
     for profile in profiles:
         profile.medal = None
-    eligible = (p for p in profiles if p.monthly_predictions_count >= minimum)
+    eligible = (p for p in profiles if getattr(p, count_attr) >= minimum)
     for medal, profile in zip(_MEDALS, eligible):
         profile.medal = medal
 
@@ -416,6 +416,12 @@ def leaderboard(request):
         selected = current
     is_past_month = selected != current
     zone = timezone.get_default_timezone()
+
+    # All-Time medals always need the prediction floor; no day-of-month rule.
+    all_time_profiles = list(_all_time_profiles())
+    _assign_medals_by_eligibility(
+        all_time_profiles, MEDAL_MIN_PREDICTIONS, count_attr="predictions_count"
+    )
 
     monthly_profiles = _monthly_profiles(*selected)
     if is_past_month:
@@ -452,7 +458,7 @@ def leaderboard(request):
         request,
         "predictions/leaderboard.html",
         {
-            "all_time_profiles": _all_time_profiles(),
+            "all_time_profiles": all_time_profiles,
             "monthly_profiles": monthly_profiles,
             "is_past_month": is_past_month,
             "selected_month": f"{selected[0]:04d}-{selected[1]:02d}",
