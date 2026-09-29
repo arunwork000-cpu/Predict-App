@@ -3,6 +3,7 @@ import json
 import logging
 import secrets
 
+from django.conf import settings
 from django.contrib import messages
 from django.contrib.auth import login
 from django.contrib.auth.decorators import login_required
@@ -696,3 +697,30 @@ def media_file(request, path):
     response["Cache-Control"] = "public, max-age=86400"
     response["X-Content-Type-Options"] = "nosniff"
     return response
+
+
+def web_manifest(request):
+    """The installable-app manifest (icons, name, theme colour)."""
+    return render(
+        request,
+        "pwa/manifest.webmanifest",
+        content_type="application/manifest+json",
+    )
+
+
+def service_worker(request):
+    """The app's service worker, served from the site root so it controls
+    every page (a worker under /static/ could only control /static/)."""
+    response = render(
+        request,
+        "pwa/sw.js",
+        {"static_url": settings.STATIC_URL},
+        content_type="application/javascript",
+    )
+    response["Cache-Control"] = "no-cache"
+    return response
+
+
+def offline(request):
+    """Shown by the service worker when a page can't be reached."""
+    return render(request, "pwa/offline.html")

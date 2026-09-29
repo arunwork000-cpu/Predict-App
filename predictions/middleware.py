@@ -12,8 +12,9 @@ class EmailRequiredMiddleware:
 
     Email used to be optional at signup, so older accounts have none, which
     means they could never get a password-reset link. Until they add one they
-    can only reach the add-email page, log out, the admin, and static/media
-    files.
+    can only reach the add-email page, log out, the admin, static/media
+    files, and the installable-app files (manifest, service worker, offline
+    page).
     """
 
     def __init__(self, get_response):
@@ -31,7 +32,13 @@ class EmailRequiredMiddleware:
     @staticmethod
     def _exempt(request):
         path = request.path_info
-        if path in (reverse("add_email"), reverse("logout")):
+        if path in (
+            reverse("add_email"),
+            reverse("logout"),
+            reverse("web_manifest"),
+            reverse("service_worker"),
+            reverse("offline"),
+        ):
             return True
         prefixes = (
             reverse("admin:index"),

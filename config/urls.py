@@ -6,10 +6,15 @@ from django.contrib import admin
 from django.contrib.auth import views as auth_views
 from django.urls import include, path
 
-from predictions.views import media_file
+from predictions.views import media_file, offline, service_worker, web_manifest
 
 urlpatterns = [
     path("admin/", admin.site.urls),
+    # Installable app (PWA). The service worker must be served from the root
+    # so its scope covers the whole site.
+    path("manifest.webmanifest", web_manifest, name="web_manifest"),
+    path("sw.js", service_worker, name="service_worker"),
+    path("offline/", offline, name="offline"),
     # Login uses Django's LoginView. Template: templates/registration/login.html
     path(
         "accounts/login/",
