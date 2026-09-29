@@ -125,6 +125,13 @@
       vertical-align: middle;
       margin-left: 4px;
     }
+    /* Table text longer than about 35 characters wraps onto the next line
+       instead of widening the column. */
+    .cell-wrap {
+      max-width: 35ch;
+      white-space: normal;
+      overflow-wrap: anywhere;
+    }
     /* table-layout: fixed makes every column's width/max-width an actual
        cap instead of a hint the browser overrides for nowrap content --
        required for the ellipsis truncation below to ever kick in. */

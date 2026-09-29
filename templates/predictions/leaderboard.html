@@ -5,6 +5,7 @@
   <section class="col-12 col-lg-6" id="leaderboard-all-time" aria-labelledby="lb-all-time-heading">
     <h1 class="h3 mb-3">Leaderboard</h1>
     <h2 class="h5 mb-2" id="lb-all-time-heading">All-Time</h2>
+    <p class="small text-muted mb-2">Minimum of 100 Counts (Predictions) required along with the higher points to be eligible for Medals</p>
     {% include "predictions/_leaderboard_table.html" with profiles=all_time_profiles is_monthly=False %}
   </section>
   <section class="col-12 col-lg-6 order-lg-first" id="leaderboard-monthly" aria-labelledby="lb-monthly-heading">
@@ -22,7 +23,7 @@
         <noscript><button type="submit" class="btn btn-sm btn-outline-secondary">Go</button></noscript>
       </form>
     </div>
-    <p class="small text-muted mb-2">Minimum of 50 Counts (Predictions) required along with the higher points to be eligible for Medals</p>
+    <p class="small text-muted mb-2">Minimum of 100 Counts (Predictions) required along with the higher points to be eligible for Medals</p>
     {% if show_voucher_announcement %}
       <div class="alert alert-info small" role="alert">
         Gift vouchers are expected to be issued to the medal winners after October month
