@@ -3,7 +3,9 @@
 // A lose -40, B win 40, B lose -60, Draw win 0 and Draw lose 0.
 // The sport ids are embedded on the Sport <select> as
 // data-autofill-points-sports (see MatchAdminForm in predictions/admin.py).
-// Only typing into Team A win points triggers it, so saved values are never
+// For Football (data-lose-from-win-sports), each win points field fills its
+// own lose points as win - 100: Team A, Team B and Draw.
+// Only typing into a win points field triggers it, so saved values are never
 // overwritten on page load, and every field stays editable afterwards.
 (function () {
   "use strict";
@@ -21,28 +23,49 @@
     }
 
     var autofillSports = [];
+    var loseFromWinSports = [];
     try {
       autofillSports = JSON.parse(sportSelect.dataset.autofillPointsSports || "[]")
         .map(String);
+      loseFromWinSports = JSON.parse(sportSelect.dataset.loseFromWinSports || "[]")
+        .map(String);
     } catch (e) {
       return;
+    }
+
+    function intValue(input) {
+      var value = input.value.trim();
+      return /^-?\d+$/.test(value) ? parseInt(value, 10) : null;
     }
 
     aWin.addEventListener("input", function () {
       if (autofillSports.indexOf(sportSelect.value) === -1) {
         return;
       }
-      var value = aWin.value.trim();
-      if (!/^-?\d+$/.test(value)) {
+      var win = intValue(aWin);
+      if (win === null) {
         return;
       }
-      var win = parseInt(value, 10);
       var rest = 100 - win;
       aLose.value = -rest;
       bWin.value = rest;
       bLose.value = -win;
       drawWin.value = 0;
       drawLose.value = 0;
+    });
+
+    // Football: each win points field fills its own lose points as
+    // win - 100, e.g. Team B win 60 gives Team B lose -40.
+    [[aWin, aLose], [bWin, bLose], [drawWin, drawLose]].forEach(function (pair) {
+      pair[0].addEventListener("input", function () {
+        if (loseFromWinSports.indexOf(sportSelect.value) === -1) {
+          return;
+        }
+        var win = intValue(pair[0]);
+        if (win !== null) {
+          pair[1].value = win - 100;
+        }
+      });
     });
   });
 })();

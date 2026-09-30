@@ -2695,6 +2695,18 @@ class MatchAdminActionTests(TestCase):
         self.assertCountEqual(ids, [tennis.pk, badminton.pk, cricket.pk])
         self.assertNotIn(football.pk, ids)
 
+    def test_lose_from_win_autofill_applies_only_to_football(self):
+        football, _ = Sport.objects.get_or_create(name="Football")
+        tennis, _ = Sport.objects.get_or_create(name="Tennis")
+        cricket, _ = Sport.objects.get_or_create(name="Cricket")
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        widget = response.context["adminform"].form.fields["sport"].widget
+        widget = getattr(widget, "widget", widget)
+        ids = json.loads(widget.attrs["data-lose-from-win-sports"])
+        self.assertEqual(ids, [football.pk])
+        self.assertNotIn(tennis.pk, ids)
+        self.assertNotIn(cricket.pk, ids)
+
     def test_add_form_exposes_all_four_points_fields(self):
         response = self.client.get(reverse("admin:predictions_match_add"))
         self.assertEqual(response.status_code, 200)

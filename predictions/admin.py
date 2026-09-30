@@ -96,6 +96,9 @@ def _int_or_none(value):
 
 # Sports whose admin points fields follow a 100-point split (see match_points.js).
 POINTS_AUTOFILL_SPORTS = ("Tennis", "Badminton", "Cricket")
+# Sports whose lose points are filled from the win points as win - 100, for
+# Team A, Team B and Draw separately (see match_points.js).
+LOSE_FROM_WIN_SPORTS = ("Football",)
 
 
 class MatchAdminForm(forms.ModelForm):
@@ -155,6 +158,13 @@ class MatchAdminForm(forms.ModelForm):
         sport_widget.attrs["data-autofill-points-sports"] = json.dumps(
             list(
                 Sport.objects.filter(name__in=POINTS_AUTOFILL_SPORTS).values_list(
+                    "id", flat=True
+                )
+            )
+        )
+        sport_widget.attrs["data-lose-from-win-sports"] = json.dumps(
+            list(
+                Sport.objects.filter(name__in=LOSE_FROM_WIN_SPORTS).values_list(
                     "id", flat=True
                 )
             )
@@ -341,7 +351,9 @@ class MatchAdmin(admin.ModelAdmin):
                 "Enter 0 in both Draw fields if the match cannot end in a draw: "
                 "the Draw box is then hidden and users pick only Team A or Team B. "
                 "For Tennis, Badminton and Cricket, entering Team A win points fills the other "
-                "fields (100-point split); all stay editable."
+                "fields (100-point split); all stay editable. "
+                "For Football, entering a win points field fills its lose points "
+                "as win - 100 (e.g. 60 gives -40); still editable."
             ),
         }),
     )
