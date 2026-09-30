@@ -1,8 +1,7 @@
-from django.utils import timezone
+from django.conf import settings
 
-from . import google_auth
+from . import google_auth, services
 from .constants import SUPPORTED_SPORTS
-from .models import Match
 
 
 def user_points(request):
@@ -27,16 +26,9 @@ def public_nav(request):
     predicted don't count, so the indicator goes away once every open match
     in a sport has been predicted.
     """
-    open_matches = Match.objects.filter(
-        is_published=True,
-        status=Match.Status.SCHEDULED,
-        winner__isnull=True,
-        is_draw=False,
-        prediction_deadline__gt=timezone.now(),
-        sport__name__in=SUPPORTED_SPORTS,
+    open_matches = services.open_matches(
+        request.user if request.user.is_authenticated else None
     )
-    if request.user.is_authenticated:
-        open_matches = open_matches.exclude(predictions__user=request.user)
     open_sport_names = set(open_matches.values_list("sport__name", flat=True))
     return {
         "nav_sports": [
@@ -48,3 +40,13 @@ def public_nav(request):
             for name in SUPPORTED_SPORTS
         ]
     }
+
+
+def app_alerts(request):
+    """Match alerts (see predictions.push): the public key the browser
+    subscribes with, and the number shown on the installed app's icon --
+    open matches the user hasn't predicted yet."""
+    context = {"vapid_public_key": settings.VAPID_PUBLIC_KEY}
+    if request.user.is_authenticated:
+        context["open_prediction_count"] = services.open_matches(request.user).count()
+    return context

@@ -666,3 +666,26 @@ class StoredFile(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class PushSubscription(models.Model):
+    """A browser/app install that turned on match alerts (see
+    predictions.push). One user can have several (phone, laptop)."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="push_subscriptions",
+    )
+    # The push service URL (Google, Apple or Mozilla) for this install.
+    endpoint = models.CharField(max_length=1000, unique=True)
+    p256dh = models.CharField(max_length=200)
+    auth = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user} ({self.endpoint[:40]}...)"

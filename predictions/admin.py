@@ -8,11 +8,13 @@ from django.db.models import Count, Q
 from django.utils import formats, timezone
 from django.utils.html import format_html
 
+from . import push
 from .models import (
     CreditLedger,
     Match,
     Prediction,
     Profile,
+    PushSubscription,
     Referral,
     ReferralSettings,
     ScoreAdjustment,
@@ -371,7 +373,12 @@ class MatchAdmin(admin.ModelAdmin):
 
     @admin.action(description="Publish selected matches")
     def publish_matches(self, request, queryset):
+        newly_published = list(
+            queryset.filter(is_published=False).values_list("pk", flat=True)
+        )
         updated = queryset.update(is_published=True)
+        # Users with match alerts on get one notification for the batch.
+        push.notify_new_matches_later(newly_published)
         self.message_user(request, f"{updated} match(es) published.", messages.SUCCESS)
 
     @admin.action(description="Unpublish selected matches")
@@ -434,6 +441,9 @@ class MatchAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
+        changed = getattr(form, "changed_data", ())
+        if obj.is_published and (not change or "is_published" in changed):
+            push.notify_new_matches_later([obj.pk])
         # score_match reconciles in every direction (first scoring, winner
         # correction, winner cleared) and safely no-ops for an unscored match
         # with no winner, so it is called on every save.
@@ -553,6 +563,22 @@ class CreditLedgerAdmin(admin.ModelAdmin):
         return False
 
 
+@admin.register(PushSubscription)
+class PushSubscriptionAdmin(admin.ModelAdmin):
+    """Devices with match alerts turned on. Read-only: devices add
+    themselves; deleting one stops alerts to that device."""
+
+    list_display = ("user", "created_at", "last_sent_at")
+    search_fields = ("user__username",)
+    readonly_fields = ("user", "endpoint", "p256dh", "auth", "created_at", "last_sent_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 def _current_month_range():
     """[start, end) for the current calendar month in the site's default
     timezone -- same convention as the monthly leaderboard (views._monthly_profiles)."""
@@ -634,6 +660,7 @@ PREDICTIONS_MENU_ORDER = (
     "ReferralSettings",
     "CreditLedger",
     "VoucherRedemption",
+    "PushSubscription",
 )
 
 _default_get_app_list = admin.site.get_app_list

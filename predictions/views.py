@@ -11,14 +11,14 @@ from django.contrib.auth.models import User
 from django.db import transaction
 from django.db.models import Count, Q, Sum
 from django.db.models.functions import TruncMonth
-from django.http import Http404, HttpResponse
+from django.http import Http404, HttpResponse, JsonResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
 from django.utils import timezone
 from django.utils.http import url_has_allowed_host_and_scheme
 from django.views.decorators.http import require_POST
 
-from . import google_auth
+from . import google_auth, push
 from .constants import DEFAULT_SPORT_SLUG, DRAW_SPORTS, SPORT_SLUGS, SUPPORTED_SPORTS
 from .forms import AddEmailForm, LocationForm, PredictionForm, RegistrationForm
 from .locations import STATES_BY_COUNTRY
@@ -26,6 +26,7 @@ from .models import (
     Match,
     Prediction,
     Profile,
+    PushSubscription,
     Referral,
     ReferralSettings,
     ScoreAdjustment,
@@ -724,3 +725,39 @@ def service_worker(request):
 def offline(request):
     """Shown by the service worker when a page can't be reached."""
     return render(request, "pwa/offline.html")
+
+
+@login_required
+@require_POST
+def push_subscribe(request):
+    """Save this browser's push subscription for the logged-in user (match
+    alerts, see predictions.push). pwa.js sends it again on every page, so
+    a device that logs in to another account moves to that account."""
+    if not push.is_enabled():
+        raise Http404
+    try:
+        data = json.loads(request.body)
+        endpoint = data["endpoint"]
+        keys = data["keys"]
+        p256dh, auth = keys["p256dh"], keys["auth"]
+    except (ValueError, KeyError, TypeError):
+        return JsonResponse({"ok": False}, status=400)
+    if not (isinstance(endpoint, str) and endpoint.startswith("https://")) or len(endpoint) > 1000:
+        return JsonResponse({"ok": False}, status=400)
+    PushSubscription.objects.update_or_create(
+        endpoint=endpoint,
+        defaults={"user": request.user, "p256dh": str(p256dh)[:200], "auth": str(auth)[:100]},
+    )
+    return JsonResponse({"ok": True})
+
+
+@require_POST
+def push_unsubscribe(request):
+    """Forget a push subscription (alerts turned off on this device)."""
+    try:
+        endpoint = json.loads(request.body)["endpoint"]
+    except (ValueError, KeyError, TypeError):
+        return JsonResponse({"ok": False}, status=400)
+    if request.user.is_authenticated:
+        PushSubscription.objects.filter(endpoint=endpoint, user=request.user).delete()
+    return JsonResponse({"ok": True})

@@ -23,6 +23,9 @@ from django.test import Client, RequestFactory, SimpleTestCase, TestCase, overri
 from django.urls import reverse
 from django.utils import dateformat, timezone
 
+from pywebpush import WebPushException
+
+from . import push
 from .admin import MatchAdmin, VoucherRedemptionAdmin
 from .constants import SUPPORTED_SPORTS
 from .locations import STATES_BY_COUNTRY
@@ -31,6 +34,7 @@ from .models import (
     Match,
     Prediction,
     Profile,
+    PushSubscription,
     Referral,
     ReferralSettings,
     ScoreAdjustment,
@@ -3821,6 +3825,7 @@ class AdminMenuOrderTests(TestCase):
                 "Referral settings",
                 "Credit ledgers",
                 "Voucher redemptions",
+                "Push subscriptions",
             ],
         )
 
@@ -5049,3 +5054,228 @@ class GoogleSignInDisabledTests(TestCase):
         self.assertNotContains(self.client.get(reverse("login")), "Continue with Google")
         self.assertEqual(self.client.post(reverse("google_start")).status_code, 404)
         self.assertEqual(self.client.get(reverse("google_callback")).status_code, 404)
+
+
+PUSH_KEYS = {
+    "VAPID_PUBLIC_KEY": "test-public-key",
+    "VAPID_PRIVATE_KEY": "test-private-key",
+    "VAPID_SUBJECT": "mailto:admin@example.com",
+}
+
+
+def make_subscription(user, n=1):
+    return PushSubscription.objects.create(
+        user=user,
+        endpoint=f"https://push.example.com/{user.username}/{n}",
+        p256dh="p256dh-key",
+        auth="auth-key",
+    )
+
+
+@override_settings(**PUSH_KEYS)
+class MatchAlertTests(TestCase):
+    """predictions.push: alerts and the app-icon number on publish."""
+
+    def setUp(self):
+        self.alice = make_user("alice", password="StrongPass123")
+        self.bob = make_user("bob", password="StrongPass123")
+        self.alice_device = make_subscription(self.alice)
+        self.bob_device = make_subscription(self.bob)
+
+    def sent(self, mocked):
+        """{endpoint: payload} for each webpush() call."""
+        return {
+            call.kwargs["subscription_info"]["endpoint"]: json.loads(call.kwargs["data"])
+            for call in mocked.call_args_list
+        }
+
+    def test_each_user_gets_their_own_unpredicted_count(self):
+        old = sport_match("Football", "Old A", "Old B", is_published=True)
+        Prediction.objects.create(user=self.bob, match=old, choice="A")
+        new = sport_match("Cricket", "New A", "New B", is_published=True)
+        with mock.patch("predictions.push.webpush") as webpush:
+            notified = push.notify_new_matches([new.pk])
+        self.assertEqual(notified, 2)
+        sent = self.sent(webpush)
+        self.assertEqual(sent[self.alice_device.endpoint]["count"], 2)
+        self.assertEqual(sent[self.bob_device.endpoint]["count"], 1)
+        self.assertEqual(
+            sent[self.alice_device.endpoint]["body"], "2 matches waiting for your prediction"
+        )
+        self.assertEqual(
+            sent[self.bob_device.endpoint]["body"], "1 match waiting for your prediction"
+        )
+        self.alice_device.refresh_from_db()
+        self.assertIsNotNone(self.alice_device.last_sent_at)
+
+    def test_user_who_already_predicted_new_match_is_skipped(self):
+        new = sport_match("Football", "Pre A", "Pre B", is_published=True)
+        Prediction.objects.create(user=self.bob, match=new, choice="A")
+        with mock.patch("predictions.push.webpush") as webpush:
+            push.notify_new_matches([new.pk])
+        self.assertEqual(list(self.sent(webpush)), [self.alice_device.endpoint])
+
+    def test_nothing_sent_for_unpublished_or_closed_matches(self):
+        hidden = sport_match("Football", "Hid A", "Hid B", is_published=False)
+        closed = sport_match(
+            "Football", "Clo A", "Clo B", is_published=True,
+            prediction_deadline=timezone.now() - timedelta(minutes=1),
+        )
+        with mock.patch("predictions.push.webpush") as webpush:
+            self.assertEqual(push.notify_new_matches([hidden.pk, closed.pk]), 0)
+        webpush.assert_not_called()
+
+    @override_settings(VAPID_PRIVATE_KEY="")
+    def test_disabled_without_keys(self):
+        new = sport_match("Football", "Off A", "Off B", is_published=True)
+        with mock.patch("predictions.push.webpush") as webpush:
+            self.assertEqual(push.notify_new_matches([new.pk]), 0)
+        webpush.assert_not_called()
+
+    def test_gone_device_is_deleted_other_errors_kept(self):
+        new = sport_match("Football", "Gone A", "Gone B", is_published=True)
+
+        def fail(subscription_info, **kwargs):
+            gone = subscription_info["endpoint"] == self.alice_device.endpoint
+            response = mock.Mock(status_code=410 if gone else 500)
+            raise WebPushException("failed", response=response)
+
+        with mock.patch("predictions.push.webpush", side_effect=fail):
+            self.assertEqual(push.notify_new_matches([new.pk]), 0)
+        self.assertFalse(PushSubscription.objects.filter(pk=self.alice_device.pk).exists())
+        self.assertTrue(PushSubscription.objects.filter(pk=self.bob_device.pk).exists())
+
+
+@override_settings(**PUSH_KEYS)
+class MatchAlertAdminTests(TestCase):
+    """Publishing in the admin sends alerts for newly published matches only."""
+
+    def setUp(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
+        # Run the "background" work inline, and record what would be sent.
+        mock.patch(
+            "predictions.push._run_in_background", side_effect=lambda f, *a: f(*a)
+        ).start()
+        mock.patch("predictions.push.connection").start()
+        self.notify = mock.patch("predictions.push.notify_new_matches").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def save(self, match, changed_data, change=True):
+        with self.captureOnCommitCallbacks(execute=True), \
+                mock.patch("predictions.admin.score_match", return_value=False):
+            MatchAdmin(Match, AdminSite()).save_model(
+                RequestFactory().post("/"), match, mock.Mock(changed_data=changed_data), change
+            )
+
+    def test_publish_action_notifies_newly_published_only(self):
+        hidden = sport_match("Football", "Act A", "Act B", is_published=False)
+        already = sport_match("Football", "Act C", "Act D", is_published=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                reverse("admin:predictions_match_changelist"),
+                {"action": "publish_matches", "_selected_action": [hidden.pk, already.pk]},
+            )
+        self.notify.assert_called_once_with([hidden.pk])
+
+    def test_ticking_published_on_change_form_notifies(self):
+        match = sport_match("Football", "Frm A", "Frm B", is_published=False)
+        match.is_published = True
+        self.save(match, ["is_published"])
+        self.notify.assert_called_once_with([match.pk])
+
+    def test_adding_published_match_notifies(self):
+        match = sport_match("Football", "New C", "New D", is_published=True)
+        self.save(match, [], change=False)
+        self.notify.assert_called_once_with([match.pk])
+
+    def test_editing_already_published_match_does_not_notify(self):
+        match = sport_match("Football", "Edt A", "Edt B", is_published=True)
+        self.save(match, ["event_name"])
+        self.notify.assert_not_called()
+
+
+@override_settings(**PUSH_KEYS)
+class PushSubscriptionViewTests(TestCase):
+    def setUp(self):
+        self.user = make_user("sub", password="StrongPass123")
+        self.client.login(username="sub", password="StrongPass123")
+        self.body = {
+            "endpoint": "https://push.example.com/abc",
+            "keys": {"p256dh": "key1", "auth": "auth1"},
+        }
+
+    def post(self, name, body):
+        return self.client.post(
+            reverse(name), json.dumps(body), content_type="application/json"
+        )
+
+    def test_subscribe_saves_and_moves_device_to_current_user(self):
+        other = make_user("other")
+        PushSubscription.objects.create(
+            user=other, endpoint=self.body["endpoint"], p256dh="x", auth="y"
+        )
+        response = self.post("push_subscribe", self.body)
+        self.assertEqual(response.status_code, 200)
+        subscription = PushSubscription.objects.get()
+        self.assertEqual(subscription.user, self.user)
+        self.assertEqual(subscription.auth, "auth1")
+
+    def test_subscribe_rejects_bad_data(self):
+        bad_bodies = (
+            {},
+            {"endpoint": "http://insecure", "keys": {"p256dh": "a", "auth": "b"}},
+        )
+        for body in bad_bodies:
+            with self.subTest(body=body):
+                self.assertEqual(self.post("push_subscribe", body).status_code, 400)
+        self.assertFalse(PushSubscription.objects.exists())
+
+    def test_subscribe_needs_login(self):
+        self.client.logout()
+        self.post("push_subscribe", self.body)
+        self.assertFalse(PushSubscription.objects.exists())
+
+    @override_settings(VAPID_PUBLIC_KEY="")
+    def test_subscribe_404_when_alerts_off(self):
+        self.assertEqual(self.post("push_subscribe", self.body).status_code, 404)
+
+    def test_unsubscribe(self):
+        self.post("push_subscribe", self.body)
+        self.post("push_unsubscribe", {"endpoint": self.body["endpoint"]})
+        self.assertFalse(PushSubscription.objects.exists())
+
+    def test_logout_forgets_this_device(self):
+        make_subscription(self.user, n=2)
+        self.post("push_subscribe", self.body)
+        self.client.post(reverse("logout"), {"push_endpoint": self.body["endpoint"]})
+        self.assertEqual(
+            list(PushSubscription.objects.values_list("endpoint", flat=True)),
+            ["https://push.example.com/sub/2"],
+        )
+
+    def test_page_carries_badge_count_and_alerts_button(self):
+        sport_match("Football", "Bdg A", "Bdg B", is_published=True)
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, 'data-badge-count="1"')
+        self.assertContains(response, 'data-vapid-key="test-public-key"')
+        self.assertContains(response, "data-push-enable")
+
+    @override_settings(VAPID_PUBLIC_KEY="")
+    def test_no_alerts_key_when_alerts_off(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertNotContains(response, "data-vapid-key")
+        self.assertContains(response, 'data-badge-count="0"')
+
+    def test_service_worker_handles_push(self):
+        response = self.client.get("/sw.js")
+        self.assertContains(response, 'addEventListener("push"')
+        self.assertContains(response, "setAppBadge")
+
+    def test_generate_vapid_keys_command(self):
+        out = StringIO()
+        call_command("generate_vapid_keys", stdout=out)
+        lines = dict(line.split("=", 1) for line in out.getvalue().split())
+        public = base64.urlsafe_b64decode(lines["VAPID_PUBLIC_KEY"] + "==")
+        private = base64.urlsafe_b64decode(lines["VAPID_PRIVATE_KEY"] + "=")
+        self.assertEqual((len(public), len(private)), (65, 32))

@@ -25,6 +25,9 @@ urlpatterns = [
     path("accounts/add-email/", views.add_email, name="add_email"),
     path("accounts/google/start/", views.google_start, name="google_start"),
     path("accounts/google/callback/", views.google_callback, name="google_callback"),
+    # Match alerts (app notifications); called by pwa.js.
+    path("push/subscribe/", views.push_subscribe, name="push_subscribe"),
+    path("push/unsubscribe/", views.push_unsubscribe, name="push_unsubscribe"),
     path("terms/", views.terms, name="terms"),
     path("privacy/", views.privacy, name="privacy"),
 ]

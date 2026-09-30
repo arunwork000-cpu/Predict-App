@@ -94,3 +94,103 @@
     }
   }
 })();
+
+// Match alerts (see predictions/push.py): the number on the app icon, and the
+// "Match alerts" menu button that turns on notifications for this device.
+(function () {
+  var script = document.currentScript;
+  if (!script || !("serviceWorker" in navigator)) return;
+  var data = script.dataset;
+  var TAG = "new-matches";  // same as push.NOTIFICATION_TAG
+  var SYNCED_KEY = "pushSynced";
+
+  // The icon number: open matches this user hasn't predicted, refreshed on
+  // every page so it drops as they predict.
+  if (data.badgeCount !== undefined) {
+    var count = Number(data.badgeCount) || 0;
+    if (navigator.setAppBadge) {
+      (count ? navigator.setAppBadge(count) : navigator.clearAppBadge()).catch(function () {});
+    }
+    if (!count) {
+      // Nothing left to predict: clear the alert too (on Android the
+      // notification is what puts the dot on the icon).
+      navigator.serviceWorker.ready
+        .then(function (reg) { return reg.getNotifications({ tag: TAG }); })
+        .then(function (list) { list.forEach(function (n) { n.close(); }); })
+        .catch(function () {});
+    }
+  }
+
+  // iPhone only offers push inside the installed app (iOS 16.4+), so there
+  // PushManager is missing in a normal Safari tab and the button stays hidden.
+  if (!data.vapidKey || !("PushManager" in window) || !("Notification" in window)) return;
+
+  function items() {
+    return document.querySelectorAll("[data-push-item]");
+  }
+
+  function showButton(show) {
+    items().forEach(function (el) { el.hidden = !show; });
+  }
+
+  function keyBytes(base64url) {
+    var padded = (base64url + "===".slice((base64url.length + 3) % 4))
+      .replace(/-/g, "+").replace(/_/g, "/");
+    var raw = atob(padded);
+    var bytes = new Uint8Array(raw.length);
+    for (var i = 0; i < raw.length; i++) bytes[i] = raw.charCodeAt(i);
+    return bytes;
+  }
+
+  // Tell the server this device belongs to the logged-in user. Only sent
+  // again when the device or the user changes.
+  function save(subscription, force) {
+    document.querySelectorAll("[data-push-endpoint]").forEach(function (input) {
+      input.value = subscription.endpoint;
+    });
+    var marker = data.user + "|" + subscription.endpoint;
+    try {
+      if (!force && localStorage.getItem(SYNCED_KEY) === marker) return Promise.resolve();
+    } catch (e) {}
+    return fetch(data.subscribeUrl, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", "X-CSRFToken": data.csrf },
+      body: JSON.stringify(subscription),
+    }).then(function (response) {
+      if (!response.ok) return;
+      try { localStorage.setItem(SYNCED_KEY, marker); } catch (e) {}
+    });
+  }
+
+  var ready = navigator.serviceWorker.ready;
+  ready
+    .then(function (reg) { return reg.pushManager.getSubscription(); })
+    .then(function (subscription) {
+      if (subscription && Notification.permission === "granted") {
+        save(subscription, false);
+      } else {
+        showButton(Notification.permission !== "denied");
+      }
+    })
+    .catch(function () {});
+
+  document.addEventListener("click", function (event) {
+    if (!event.target.closest("[data-push-enable]")) return;
+    Notification.requestPermission().then(function (permission) {
+      if (permission !== "granted") {
+        showButton(false);
+        return;
+      }
+      return ready
+        .then(function (reg) {
+          return reg.pushManager.subscribe({
+            userVisibleOnly: true,
+            applicationServerKey: keyBytes(data.vapidKey),
+          });
+        })
+        .then(function (subscription) { return save(subscription, true); })
+        .then(function () { showButton(false); });
+    }).catch(function () {});
+  });
+})();
