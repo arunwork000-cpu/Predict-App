@@ -344,6 +344,10 @@
         <li class="nav-item" data-push-item hidden>
           <button type="button" class="btn btn-outline-light btn-sm" data-push-enable>&#128276; Match alerts</button>
         </li>
+        {# Shown by pwa.js when the user blocked notifications: the site can't ask again, so it explains how. #}
+        <li class="nav-item" data-push-blocked-item hidden>
+          <button type="button" class="btn btn-outline-light btn-sm" data-push-blocked>&#128276; Alerts blocked</button>
+        </li>
         {# Shown by pwa.js when the browser can install the app. #}
         <li class="nav-item" data-pwa-install-item hidden>
           <button type="button" class="btn btn-success btn-sm" data-pwa-install>Install app</button>
@@ -406,6 +410,49 @@
       </div>
     </div>
   </div>
+
+  {% if user.is_authenticated and vapid_public_key %}
+    {# Steps to allow notifications again after blocking them; pwa.js shows this device's steps. #}
+    <div class="modal fade" id="push-blocked-modal" tabindex="-1" aria-labelledby="push-blocked-title" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h2 class="modal-title fs-5" id="push-blocked-title">Turn on match alerts</h2>
+            <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body">
+            <p>Notifications for WinSports are blocked on this device. Allow them in your settings:</p>
+            <div data-push-help="android" hidden>
+              <p class="fw-semibold mb-1">Installed app</p>
+              <ol>
+                <li>Press and hold the WinSports icon and tap <strong>App info</strong>.</li>
+                <li>Tap <strong>Notifications</strong> and turn them on.</li>
+              </ol>
+              <p class="fw-semibold mb-1">In Chrome</p>
+              <ol>
+                <li>Tap the icon to the left of the web address.</li>
+                <li>Tap <strong>Permissions</strong> &rarr; <strong>Notifications</strong> &rarr; <strong>Allow</strong>.</li>
+              </ol>
+            </div>
+            <div data-push-help="ios" hidden>
+              <ol>
+                <li>Open the <strong>Settings</strong> app.</li>
+                <li>Tap <strong>Notifications</strong>, then <strong>WinSports</strong>.</li>
+                <li>Turn on <strong>Allow Notifications</strong>.</li>
+              </ol>
+            </div>
+            <div data-push-help="desktop" hidden>
+              <ol>
+                <li>Click the icon to the left of the web address.</li>
+                <li>Set <strong>Notifications</strong> to <strong>Allow</strong>.</li>
+              </ol>
+            </div>
+            <p class="mb-0">Then come back to WinSports: alerts turn on by themselves.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% endif %}
 
   <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
 </body>

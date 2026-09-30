@@ -125,12 +125,33 @@
   // PushManager is missing in a normal Safari tab and the button stays hidden.
   if (!data.vapidKey || !("PushManager" in window) || !("Notification" in window)) return;
 
-  function items() {
-    return document.querySelectorAll("[data-push-item]");
+  // Which menu button to show: "enable" (the site can ask), "blocked" (the
+  // user said no, so only the phone's settings can undo it) or null (on).
+  function showButton(which) {
+    document.querySelectorAll("[data-push-item]").forEach(function (el) {
+      el.hidden = which !== "enable";
+    });
+    document.querySelectorAll("[data-push-blocked-item]").forEach(function (el) {
+      el.hidden = which !== "blocked";
+    });
   }
 
-  function showButton(show) {
-    items().forEach(function (el) { el.hidden = !show; });
+  function platform() {
+    var ua = navigator.userAgent;
+    if (/iphone|ipad|ipod/i.test(ua) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1)) {
+      return "ios";
+    }
+    return /android/i.test(ua) ? "android" : "desktop";
+  }
+
+  function showBlockedHelp() {
+    var modal = document.getElementById("push-blocked-modal");
+    if (!modal || !window.bootstrap) return;
+    var device = platform();
+    modal.querySelectorAll("[data-push-help]").forEach(function (el) {
+      el.hidden = el.dataset.pushHelp !== device;
+    });
+    bootstrap.Modal.getOrCreateInstance(modal).show();
   }
 
   function keyBytes(base64url) {
@@ -164,33 +185,59 @@
   }
 
   var ready = navigator.serviceWorker.ready;
-  ready
-    .then(function (reg) { return reg.pushManager.getSubscription(); })
-    .then(function (subscription) {
-      if (subscription && Notification.permission === "granted") {
-        save(subscription, false);
-      } else {
-        showButton(Notification.permission !== "denied");
-      }
-    })
-    .catch(function () {});
+
+  function subscribe() {
+    return ready
+      .then(function (reg) {
+        return reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: keyBytes(data.vapidKey),
+        });
+      })
+      .then(function (subscription) { return save(subscription, true); })
+      .then(function () { showButton(null); })
+      .catch(function () { showButton("enable"); });
+  }
+
+  function refresh() {
+    ready
+      .then(function (reg) { return reg.pushManager.getSubscription(); })
+      .then(function (subscription) {
+        var permission = Notification.permission;
+        if (permission === "granted") {
+          // Allowed -- possibly just now, in the phone's settings after
+          // blocking: make sure this device is subscribed.
+          showButton(null);
+          return subscription ? save(subscription, false) : subscribe();
+        }
+        showButton(permission === "denied" ? "blocked" : "enable");
+      })
+      .catch(function () {});
+  }
+
+  refresh();
+  // Coming back to the app, e.g. from the phone's settings: check again.
+  document.addEventListener("visibilitychange", function () {
+    if (document.visibilityState === "visible") refresh();
+  });
 
   document.addEventListener("click", function (event) {
+    if (event.target.closest("[data-push-blocked]")) {
+      showBlockedHelp();
+      return;
+    }
     if (!event.target.closest("[data-push-enable]")) return;
     Notification.requestPermission().then(function (permission) {
-      if (permission !== "granted") {
-        showButton(false);
-        return;
-      }
-      return ready
-        .then(function (reg) {
-          return reg.pushManager.subscribe({
-            userVisibleOnly: true,
-            applicationServerKey: keyBytes(data.vapidKey),
-          });
-        })
-        .then(function (subscription) { return save(subscription, true); })
-        .then(function () { showButton(false); });
+      if (permission === "granted") return subscribe();
+      showButton(permission === "denied" ? "blocked" : "enable");
     }).catch(function () {});
+  });
+
+  // Logging out removes this device on the server (see signals.py), so it
+  // must be sent again at the next login.
+  document.addEventListener("submit", function (event) {
+    if (event.target.querySelector("[data-push-endpoint]")) {
+      try { localStorage.removeItem(SYNCED_KEY); } catch (e) {}
+    }
   });
 })();

@@ -5261,10 +5261,24 @@ class PushSubscriptionViewTests(TestCase):
         self.assertContains(response, 'data-vapid-key="test-public-key"')
         self.assertContains(response, "data-push-enable")
 
+    def test_blocked_button_and_help_for_each_device(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, "data-push-blocked")
+        self.assertContains(response, 'id="push-blocked-modal"')
+        for device in ("android", "ios", "desktop"):
+            with self.subTest(device=device):
+                self.assertContains(response, f'data-push-help="{device}"')
+
+    def test_no_blocked_help_when_logged_out(self):
+        self.client.logout()
+        response = self.client.get(reverse("match_list"))
+        self.assertNotContains(response, 'id="push-blocked-modal"')
+
     @override_settings(VAPID_PUBLIC_KEY="")
     def test_no_alerts_key_when_alerts_off(self):
         response = self.client.get(reverse("match_list"))
         self.assertNotContains(response, "data-vapid-key")
+        self.assertNotContains(response, 'id="push-blocked-modal"')
         self.assertContains(response, 'data-badge-count="0"')
 
     def test_service_worker_handles_push(self):
