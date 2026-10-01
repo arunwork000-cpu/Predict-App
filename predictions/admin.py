@@ -619,8 +619,9 @@ class UserPredictionCountAdmin(admin.ModelAdmin):
                 predictions_month_count=Count(
                     "user__predictions",
                     filter=Q(
-                        user__predictions__created_at__gte=start,
-                        user__predictions__created_at__lt=end,
+                        # Kickoff month, as the leaderboard medal floor counts it.
+                        user__predictions__match__start_time__gte=start,
+                        user__predictions__match__start_time__lt=end,
                     ),
                 ),
                 predictions_alltime_count=Count("user__predictions"),

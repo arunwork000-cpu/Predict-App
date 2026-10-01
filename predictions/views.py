@@ -342,13 +342,16 @@ def _parse_month(value):
 
 
 def _monthly_profiles(year, month):
-    """Points earned during the given calendar month.
+    """Points earned on matches that kicked off in the given calendar month.
 
-    Uses the sum of that month's ScoreAdjustment rows rather than
-    Profile.points, so a winner correction made this month for a match
-    scored last month only contributes its net adjustment -- never the full
-    original award again -- and re-running scoring with no change (delta 0)
-    contributes nothing, matching score_match()'s existing idempotency.
+    A match belongs to its kickoff month, not the day its result was
+    entered: a late result for a 30 Sep match still counts for September.
+    Uses the sum of the ScoreAdjustment rows for those matches rather than
+    Profile.points, so a winner correction only contributes its net
+    adjustment -- never the full original award again -- and re-running
+    scoring with no change (delta 0) contributes nothing, matching
+    score_match()'s existing idempotency. Prediction counts (for the medal
+    floor) are grouped by kickoff month too, so they match the points.
     """
     zone = timezone.get_default_timezone()
     start = datetime.datetime(year, month, 1, tzinfo=zone)
@@ -358,14 +361,18 @@ def _monthly_profiles(year, month):
         else datetime.datetime(year, month + 1, 1, tzinfo=zone)
     )
     rows = (
-        ScoreAdjustment.objects.filter(created_at__gte=start, created_at__lt=end)
+        ScoreAdjustment.objects.filter(
+            match__start_time__gte=start, match__start_time__lt=end
+        )
         .values("user_id")
         .annotate(total=Sum("delta"))
     )
     totals = {row["user_id"]: row["total"] for row in rows}
 
     prediction_rows = (
-        Prediction.objects.filter(created_at__gte=start, created_at__lt=end)
+        Prediction.objects.filter(
+            match__start_time__gte=start, match__start_time__lt=end
+        )
         .values("user_id")
         .annotate(total=Count("id"))
     )
@@ -381,6 +388,7 @@ def _monthly_profiles(year, month):
 
 MEDAL_ELIGIBILITY_START_DAY = 21  # day-of-month the 100-prediction floor kicks in
 MEDAL_MIN_PREDICTIONS = 100
+MEDAL_ELIGIBILITY_FIRST_MONTH = (2026, 9)  # past months before this keep rank-only winners
 _MEDALS = ("gold", "silver", "bronze")
 
 
@@ -427,9 +435,16 @@ def leaderboard(request):
 
     monthly_profiles = _monthly_profiles(*selected)
     if is_past_month:
-        # Only the winners: a zero-point player isn't one. Past months are
-        # already decided, so medals stay purely rank-based here.
-        monthly_profiles = [p for p in monthly_profiles if p.monthly_points > 0][:3]
+        # Only the winners: a zero-point player isn't one. A finished month
+        # is past the eligibility day, so the prediction floor applies (from
+        # the month the rule was introduced; earlier months stay rank-based).
+        winners = [p for p in monthly_profiles if p.monthly_points > 0]
+        if selected >= MEDAL_ELIGIBILITY_FIRST_MONTH:
+            winners = [
+                p for p in winners
+                if p.monthly_predictions_count >= MEDAL_MIN_PREDICTIONS
+            ]
+        monthly_profiles = winners[:3]
         _assign_medals_by_rank(monthly_profiles)
     else:
         today = timezone.localtime(timezone.now(), zone).day
@@ -441,7 +456,7 @@ def leaderboard(request):
     months_with_activity = {
         (m.year, m.month)
         for m in ScoreAdjustment.objects.annotate(
-            month=TruncMonth("created_at", tzinfo=zone)
+            month=TruncMonth("match__start_time", tzinfo=zone)
         )
         .values_list("month", flat=True)
         .distinct()

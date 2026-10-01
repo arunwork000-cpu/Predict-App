@@ -459,7 +459,8 @@ class ScoreAdjustment(models.Model):
     scoring, a winner correction, or clearing a winner) -- the *delta*, not
     the absolute award, so summing these never double-counts a re-score.
     Profile.points is always the all-time total; summing this ledger's rows
-    created within the current calendar month gives the monthly leaderboard.
+    for matches that kicked off (``match.start_time``) within a calendar
+    month gives that month's leaderboard, whenever the result was entered.
     """
 
     user = models.ForeignKey(

@@ -124,6 +124,16 @@ def future_match(**kwargs):
     return Match.objects.create(**defaults)
 
 
+def match_kicking_off(when, **kwargs):
+    """A future_match() whose kickoff (and deadline) is moved to `when` --
+    the Monthly leaderboard files a match's points under its kickoff month.
+    .update() skips model validation, so `when` may be in the past."""
+    match = future_match(**kwargs)
+    Match.objects.filter(pk=match.pk).update(start_time=when, prediction_deadline=when)
+    match.refresh_from_db()
+    return match
+
+
 class ProfileSignalTests(TestCase):
     def test_profile_created_with_user(self):
         user = make_user("alice", password="pass12345")
@@ -1673,7 +1683,7 @@ class MonthlyLeaderboardTests(TestCase):
     def test_monthly_total_matches_this_months_scoring(self):
         alice = self._user("alice")
         bob = self._user("bob")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         Prediction.objects.create(user=bob, match=match, choice="B")
 
@@ -1687,7 +1697,7 @@ class MonthlyLeaderboardTests(TestCase):
 
     def test_rescoring_same_winner_does_not_double_count(self):
         alice = self._user("alice")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         match.winner = match.team_a
         match.save()
@@ -1701,7 +1711,7 @@ class MonthlyLeaderboardTests(TestCase):
     def test_winner_correction_adjusts_monthly_total_without_double_counting(self):
         alice = self._user("alice")
         bob = self._user("bob")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         Prediction.objects.create(user=bob, match=match, choice="B")
 
@@ -1724,7 +1734,7 @@ class MonthlyLeaderboardTests(TestCase):
 
     def test_clearing_winner_zeroes_out_the_monthly_total(self):
         alice = self._user("alice")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         match.winner = match.team_a
         match.save()
@@ -1737,22 +1747,54 @@ class MonthlyLeaderboardTests(TestCase):
 
         self.assertEqual(self._monthly_totals()["alice"], 0)
 
-    def test_adjustment_dated_last_month_does_not_count_this_month(self):
+    def _last_months_match(self):
+        """(a match that kicked off mid last month, that month's 'YYYY-MM')."""
+        when = PastMonthLeaderboardTests._start_of_this_month() - timedelta(days=5)
+        return match_kicking_off(when), f"{when.year:04d}-{when.month:02d}"
+
+    def _totals_for(self, month):
+        response = self.client.get(reverse("leaderboard") + f"?month={month}")
+        return {
+            p.user.username: p.monthly_points
+            for p in response.context["monthly_profiles"]
+        }
+
+    @mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
+    def test_late_result_counts_in_kickoff_month(self):
+        # A match from last month whose result is only entered today.
         alice = self._user("alice")
-        match = future_match()
+        match, last_month = self._last_months_match()
         Prediction.objects.create(user=alice, match=match, choice="A")
         match.winner = match.team_a
         match.save()
         score_match(match.pk)
 
-        # Backdate the ledger row, as if this scoring had actually run last month.
-        ScoreAdjustment.objects.filter(user=alice, match=match).update(
-            created_at=timezone.now() - timedelta(days=40)
-        )
-
         self.assertEqual(self._monthly_totals().get("alice", 0), 0)
-        # All-time points are unaffected by which month the ledger row is dated.
+        self.assertEqual(self._totals_for(last_month)["alice"], POINTS_CORRECT)
         self.assertEqual(self._points(alice), POINTS_CORRECT)
+
+    @mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
+    def test_correction_counts_in_kickoff_month(self):
+        alice = self._user("alice")
+        bob = self._user("bob")
+        match, last_month = self._last_months_match()
+        Prediction.objects.create(user=alice, match=match, choice="A")
+        Prediction.objects.create(user=bob, match=match, choice="B")
+        match.winner = match.team_a
+        match.save()
+        score_match(match.pk)
+
+        match.refresh_from_db()
+        match.winner = match.team_b
+        match.save()
+        score_match(match.pk)
+
+        totals = self._totals_for(last_month)
+        self.assertEqual(totals["bob"], POINTS_CORRECT)
+        self.assertNotIn("alice", totals)  # net loser drops off the winners list
+        this_month = self._monthly_totals()
+        self.assertEqual(this_month["alice"], 0)
+        self.assertEqual(this_month["bob"], 0)
 
     def test_profile_with_no_activity_this_month_shows_zero(self):
         self._user("carol")
@@ -1774,8 +1816,12 @@ class MonthlyLeaderboardTests(TestCase):
         self.assertIn("India", row)
 
 
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
 class PastMonthLeaderboardTests(TestCase):
-    """?month=YYYY-MM on the Monthly board: past months show only the top 3."""
+    """?month=YYYY-MM on the Monthly board: past months show only the top 3.
+
+    The prediction-count floor is switched off (minimum 0) so these tests
+    only cover ranking; PastMonthMedalEligibilityTests covers the floor."""
 
     @staticmethod
     def _start_of_this_month():
@@ -1792,12 +1838,9 @@ class PastMonthLeaderboardTests(TestCase):
         user = User.objects.filter(username=username).first() or make_user(
             username, password="pass12345"
         )
-        adjustment = ScoreAdjustment.objects.create(
-            user=user, match=future_match(), delta=delta
-        )
-        if when is not None:
-            # auto_now_add ignores create(); backdate the ledger row directly.
-            ScoreAdjustment.objects.filter(pk=adjustment.pk).update(created_at=when)
+        # Points belong to the month the match kicked off.
+        match = match_kicking_off(when or timezone.now())
+        ScoreAdjustment.objects.create(user=user, match=match, delta=delta)
         return user
 
     def _monthly_names(self, month=None):
@@ -1895,6 +1938,107 @@ class PastMonthLeaderboardTests(TestCase):
         self.assertEqual(last_names, ["last_second"])
 
 
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 3)
+class PastMonthMedalEligibilityTests(TestCase):
+    """Past-month winners need MEDAL_MIN_PREDICTIONS predictions in that
+    month, from MEDAL_ELIGIBILITY_FIRST_MONTH onward."""
+
+    def setUp(self):
+        start = PastMonthLeaderboardTests._start_of_this_month()
+        self.when = start - timedelta(days=5)
+        self.month = f"{self.when.year:04d}-{self.when.month:02d}"
+        self.this_month = (self.when.year, self.when.month)
+
+    def _player(self, username, points, predictions):
+        user = make_user(username, password="pass12345")
+        ScoreAdjustment.objects.create(
+            user=user, match=match_kicking_off(self.when), delta=points
+        )
+        for _ in range(predictions):
+            Prediction.objects.create(
+                user=user, match=match_kicking_off(self.when), choice="A"
+            )
+        return user
+
+    def _winners(self):
+        response = self.client.get(reverse("leaderboard") + f"?month={self.month}")
+        return [
+            (p.user.username, p.medal) for p in response.context["monthly_profiles"]
+        ], response
+
+    def _setup_board(self):
+        self._player("casual", 90, 1)  # most points, too few predictions
+        self._player("first", 50, 3)
+        self._player("second", 40, 5)
+        self._player("third", 30, 3)
+        self._player("fourth", 20, 4)
+
+    def test_ineligible_player_is_skipped_and_next_moves_up(self):
+        self._setup_board()
+        with mock.patch(
+            "predictions.views.MEDAL_ELIGIBILITY_FIRST_MONTH", self.this_month
+        ):
+            winners, _ = self._winners()
+
+        self.assertEqual(
+            winners, [("first", "gold"), ("second", "silver"), ("third", "bronze")]
+        )
+
+    def test_months_before_the_rule_stay_rank_only(self):
+        self._setup_board()
+        next_month = (
+            (self.when.year + 1, 1)
+            if self.when.month == 12
+            else (self.when.year, self.when.month + 1)
+        )
+        with mock.patch("predictions.views.MEDAL_ELIGIBILITY_FIRST_MONTH", next_month):
+            winners, _ = self._winners()
+
+        self.assertEqual(
+            winners, [("casual", "gold"), ("first", "silver"), ("second", "bronze")]
+        )
+
+    def test_no_eligible_players_shows_no_winners_message(self):
+        self._player("casual", 90, 1)
+        with mock.patch(
+            "predictions.views.MEDAL_ELIGIBILITY_FIRST_MONTH", self.this_month
+        ):
+            winners, response = self._winners()
+
+        self.assertEqual(winners, [])
+        self.assertContains(response, "No winners recorded for this month.")
+
+
+class UserPredictionCountAdminTests(TestCase):
+    """Admin User Counts page counts this month's predictions by kickoff."""
+
+    def test_this_month_counts_by_match_kickoff(self):
+        admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(admin_user)
+        player = make_user("player", password="pass12345")
+        start = PastMonthLeaderboardTests._start_of_this_month()
+        # Made last month for a match kicking off this month -> this month.
+        upcoming = Prediction.objects.create(
+            user=player, match=match_kicking_off(start + timedelta(hours=1)), choice="A"
+        )
+        Prediction.objects.filter(pk=upcoming.pk).update(
+            created_at=start - timedelta(days=1)
+        )
+        # A match that kicked off last month -> not this month.
+        Prediction.objects.create(
+            user=player, match=match_kicking_off(start - timedelta(days=1)), choice="A"
+        )
+
+        response = self.client.get(
+            reverse("admin:predictions_userpredictioncount_changelist")
+        )
+        rows = {
+            row.user.username: row for row in response.context["cl"].result_list
+        }
+        self.assertEqual(rows["player"].predictions_month_count, 1)
+        self.assertEqual(rows["player"].predictions_alltime_count, 2)
+
+
 class VoucherAnnouncementTests(TestCase):
     """Temporary October-2026 voucher promo banner on the Monthly board."""
 
@@ -1985,7 +2129,7 @@ class LeaderboardMedalTests(TestCase):
             make_user(f"m{index}", password="pass12345")
             for index in range(4)
         ]
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         for user, delta in zip(users, (40, 30, 20, 10)):
             ScoreAdjustment.objects.create(user=user, match=match, delta=delta)
 
@@ -3672,16 +3816,11 @@ class IndiaTimeZoneTests(TestCase):
         from datetime import datetime, timezone as dt_timezone
 
         user = make_user("indian", password="pass12345")
-        match = future_match()
         # IST midnight on 1 Sept 2026 is 18:30 UTC on 31 Aug.
-        before = ScoreAdjustment.objects.create(user=user, match=match, delta=7)
-        inside = ScoreAdjustment.objects.create(user=user, match=match, delta=5)
-        ScoreAdjustment.objects.filter(pk=before.pk).update(
-            created_at=datetime(2026, 8, 31, 18, 0, tzinfo=dt_timezone.utc)
-        )
-        ScoreAdjustment.objects.filter(pk=inside.pk).update(
-            created_at=datetime(2026, 8, 31, 19, 0, tzinfo=dt_timezone.utc)
-        )
+        before = match_kicking_off(datetime(2026, 8, 31, 18, 0, tzinfo=dt_timezone.utc))
+        inside = match_kicking_off(datetime(2026, 8, 31, 19, 0, tzinfo=dt_timezone.utc))
+        ScoreAdjustment.objects.create(user=user, match=before, delta=7)
+        ScoreAdjustment.objects.create(user=user, match=inside, delta=5)
         fake_now = datetime(2026, 9, 15, 12, 0, tzinfo=dt_timezone.utc)
         for cookie in ("America/Los_Angeles", "Pacific/Auckland", "Asia/Kolkata"):
             with self.subTest(visitor_zone=cookie):
