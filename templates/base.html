@@ -411,34 +411,6 @@
     </div>
   </div>
 
-  {# Android browsers that don't offer the install prompt (some phones, in-app browsers); manual steps. #}
-  <div class="modal fade" id="pwa-android-modal" tabindex="-1" aria-labelledby="pwa-android-title" aria-hidden="true">
-    <div class="modal-dialog modal-dialog-centered">
-      <div class="modal-content">
-        <div class="modal-header">
-          <h2 class="modal-title fs-5" id="pwa-android-title">Install WinSports</h2>
-          <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
-        </div>
-        <div class="modal-body">
-          <p class="small alert alert-warning py-2" data-pwa-inapp hidden>
-            You're in the WhatsApp/Facebook browser. First tap its menu and choose
-            <strong>Open in Chrome</strong>, then follow these steps.
-          </p>
-          <ol class="mb-2">
-            <li class="mb-2">
-              Tap the <strong>&#8942;</strong> menu at the top right of Chrome.
-            </li>
-            <li class="mb-2">Tap <strong>Install app</strong> or <strong>Add to Home screen</strong>.</li>
-            <li>Tap <strong>Install</strong> (or <strong>Add</strong>). WinSports will appear on your home screen.</li>
-          </ol>
-          <p class="small text-muted mb-0">
-            If the menu shows <strong>Open WinSports app</strong>, it's already installed &mdash; look for it on your home screen.
-          </p>
-        </div>
-      </div>
-    </div>
-  </div>
-
   {% if user.is_authenticated and vapid_public_key %}
     {# Steps to allow notifications again after blocking them; pwa.js shows this device's steps. #}
     <div class="modal fade" id="push-blocked-modal" tabindex="-1" aria-labelledby="push-blocked-title" aria-hidden="true">

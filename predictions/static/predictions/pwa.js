@@ -16,12 +16,7 @@
   var DISMISS_DAYS = 30;
   var isIos = /iphone|ipad|ipod/i.test(navigator.userAgent) ||
     (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
-  var isAndroid = /android/i.test(navigator.userAgent);
-  // WhatsApp/Facebook/Instagram open links in their own browser, which can't install.
-  var isInApp = /FBAN|FBAV|Instagram|WhatsApp|; wv\)/i.test(navigator.userAgent);
-  var FALLBACK_DELAY_MS = 4000;
   var deferredPrompt = null;
-  var browserHandlesInstall = false;  // the browser fired its own install events
 
   function dismissedRecently() {
     try {
@@ -67,12 +62,6 @@
       deferredPrompt = null;
     } else if (isIos && window.bootstrap) {
       bootstrap.Modal.getOrCreateInstance(document.getElementById("pwa-ios-modal")).show();
-    } else if (isAndroid && window.bootstrap) {
-      var modal = document.getElementById("pwa-android-modal");
-      modal.querySelectorAll("[data-pwa-inapp]").forEach(function (el) {
-        el.hidden = !isInApp;
-      });
-      bootstrap.Modal.getOrCreateInstance(modal).show();
     }
   }
 
@@ -81,13 +70,9 @@
   window.addEventListener("beforeinstallprompt", function (event) {
     event.preventDefault();
     deferredPrompt = event;
-    browserHandlesInstall = true;
     showInstall();
   });
-  window.addEventListener("appinstalled", function () {
-    browserHandlesInstall = true;
-    hideInstall();
-  });
+  window.addEventListener("appinstalled", hideInstall);
 
   document.addEventListener("click", function (event) {
     if (event.target.closest("[data-pwa-install]")) {
@@ -107,17 +92,6 @@
     } else {
       showInstall();
     }
-  }
-
-  // Android browsers that never fire beforeinstallprompt (some phones' Chrome,
-  // in-app browsers): still offer the button, which then shows manual steps.
-  // If the prompt does arrive later, the button uses it instead.
-  if (isAndroid) {
-    window.addEventListener("load", function () {
-      setTimeout(function () {
-        if (!browserHandlesInstall) showInstall();
-      }, FALLBACK_DELAY_MS);
-    });
   }
 })();
 
