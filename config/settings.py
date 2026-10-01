@@ -113,6 +113,8 @@ TEMPLATES = [
                 'django.contrib.messages.context_processors.messages',
                 'predictions.context_processors.user_points',
                 'predictions.context_processors.public_nav',
+                'predictions.context_processors.google_login',
+                'predictions.context_processors.app_alerts',
             ],
         },
     },
@@ -244,6 +246,17 @@ DEFAULT_FROM_EMAIL = env(
 )
 
 
+# Google sign-in (predictions/google_auth.py)
+
+# OAuth client from Google Cloud Console (type "Web application"), with
+# redirect URI https://<host>/accounts/google/callback/. Unset = the
+# "Continue with Google" button is hidden and its URLs return 404.
+GOOGLE_CLIENT_ID = env('GOOGLE_CLIENT_ID', default='').strip().strip('"\'').strip()
+GOOGLE_CLIENT_SECRET = (
+    env('GOOGLE_CLIENT_SECRET', default='').strip().strip('"\'').strip()
+)
+
+
 # Match import (predictions/importers, `manage.py sync_external_matches`)
 
 # RapidAPI key for the FlashLive Sports API (Flashscore data). Unset = the
@@ -266,6 +279,19 @@ FLASHLIVE_SPORT_IDS = env.dict('FLASHLIVE_SPORT_IDS', default={})
 # Whole hours from UTC that "today"/"tomorrow" are counted in for the import
 # (FlashLive takes no half hours). 5 = a day runs 00:30 to 00:30 IST.
 FLASHLIVE_UTC_OFFSET = env.int('FLASHLIVE_UTC_OFFSET', default=5)
+
+
+# App notifications (predictions/push.py): when matches are published, users
+# who turned on match alerts get a quiet notification and an app-icon badge
+# with the number of open matches they haven't predicted. Generate a key pair
+# with `manage.py generate_vapid_keys`. Unset = alerts are off and the
+# "Match alerts" button is hidden. Never change the keys once users have
+# subscribed: their subscriptions would stop working.
+VAPID_PUBLIC_KEY = env('VAPID_PUBLIC_KEY', default='').strip().strip('"\'').strip()
+VAPID_PRIVATE_KEY = env('VAPID_PRIVATE_KEY', default='').strip().strip('"\'').strip()
+# Contact the push services (Google, Apple, Mozilla) can reach if something
+# goes wrong: a mailto: or https: URL.
+VAPID_SUBJECT = env('VAPID_SUBJECT', default='mailto:admin@winsports.cc')
 
 
 # Logging

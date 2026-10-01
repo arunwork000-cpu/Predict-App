@@ -1,0 +1,52 @@
+{% load static %}<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#0B3D2E">
+  <title>Offline · WinSports</title>
+  <link rel="icon" type="image/png" href="{% static 'predictions/icons/favicon-32.png' %}">
+  <style>
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: #f8f9fa;
+      color: #1e293b;
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      text-align: center;
+      padding: 16px;
+      box-sizing: border-box;
+    }
+    img {
+      width: 72px;
+      height: 72px;
+      border-radius: 16px;
+    }
+    h1 {
+      color: #0B3D2E;
+      font-size: 1.5rem;
+      margin: 1rem 0 .5rem;
+    }
+    button {
+      margin-top: 1rem;
+      padding: .6rem 1.4rem;
+      font-size: 1rem;
+      color: #fff;
+      background: #0B3D2E;
+      border: 0;
+      border-radius: .375rem;
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <img src="{% static 'predictions/icons/icon-192.png' %}" alt="">
+    <h1>You're offline</h1>
+    <p>Check your internet connection to see the latest matches and scores.</p>
+    <button type="button" onclick="location.reload()">Try again</button>
+  </main>
+</body>
+</html>

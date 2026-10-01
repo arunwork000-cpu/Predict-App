@@ -10,6 +10,7 @@ from django.template.loader import render_to_string
 from django.utils import timezone
 from django.utils.text import slugify
 
+from .constants import SUPPORTED_SPORTS
 from .models import (
     CreditLedger,
     Match,
@@ -28,6 +29,23 @@ from .models import (
 # each match's own team_a/team_b win/lose point fields instead.
 POINTS_CORRECT = 10
 POINTS_WRONG = -5
+
+
+def open_matches(user=None):
+    """Published matches still open for predictions, in the site's sports --
+    the same conditions as Match.predictions_open. With a user, matches they
+    have already predicted are left out."""
+    matches = Match.objects.filter(
+        is_published=True,
+        status=Match.Status.SCHEDULED,
+        winner__isnull=True,
+        is_draw=False,
+        prediction_deadline__gt=timezone.now(),
+        sport__name__in=SUPPORTED_SPORTS,
+    )
+    if user is not None:
+        matches = matches.exclude(predictions__user=user)
+    return matches
 
 
 def sync_match_statuses():

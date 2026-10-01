@@ -21,8 +21,11 @@ from django.db import IntegrityError
 from django.db.models import ProtectedError
 from django.test import Client, RequestFactory, SimpleTestCase, TestCase, override_settings
 from django.urls import reverse
-from django.utils import timezone
+from django.utils import dateformat, timezone
 
+from pywebpush import WebPushException
+
+from . import push
 from .admin import MatchAdmin, VoucherRedemptionAdmin
 from .constants import SUPPORTED_SPORTS
 from .locations import STATES_BY_COUNTRY
@@ -31,6 +34,7 @@ from .models import (
     Match,
     Prediction,
     Profile,
+    PushSubscription,
     Referral,
     ReferralSettings,
     ScoreAdjustment,
@@ -118,6 +122,16 @@ def future_match(**kwargs):
     }
     defaults.update(kwargs)
     return Match.objects.create(**defaults)
+
+
+def match_kicking_off(when, **kwargs):
+    """A future_match() whose kickoff (and deadline) is moved to `when` --
+    the Monthly leaderboard files a match's points under its kickoff month.
+    .update() skips model validation, so `when` may be in the past."""
+    match = future_match(**kwargs)
+    Match.objects.filter(pk=match.pk).update(start_time=when, prediction_deadline=when)
+    match.refresh_from_db()
+    return match
 
 
 class ProfileSignalTests(TestCase):
@@ -630,6 +644,50 @@ class TermsAndPrivacyTests(TestCase):
             response, "You must accept the Terms and Conditions to register."
         )
         self.assertFalse(User.objects.filter(username="newuser").exists())
+
+
+class InstallableAppTests(TestCase):
+    """PWA files: manifest, service worker, offline page, and the menu."""
+
+    def test_manifest(self):
+        response = self.client.get(reverse("web_manifest"))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/manifest+json")
+        manifest = json.loads(response.content)
+        self.assertEqual(manifest["display"], "standalone")
+        self.assertEqual(
+            {icon["sizes"] for icon in manifest["icons"]}, {"192x192", "512x512"}
+        )
+        self.assertIn("maskable", [icon["purpose"] for icon in manifest["icons"]])
+
+    def test_service_worker_served_from_root_uncached(self):
+        response = self.client.get("/sw.js")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response["Content-Type"], "application/javascript")
+        self.assertEqual(response["Cache-Control"], "no-cache")
+        self.assertContains(response, reverse("offline"))
+
+    def test_offline_page(self):
+        response = self.client.get(reverse("offline"))
+        self.assertContains(response, "You're offline")
+
+    def test_pwa_files_reachable_for_user_without_email(self):
+        make_user("old", email="", password="StrongPass123")
+        self.client.login(username="old", password="StrongPass123")
+        for name in ("web_manifest", "service_worker", "offline"):
+            with self.subTest(name=name):
+                self.assertEqual(self.client.get(reverse(name)).status_code, 200)
+
+    def test_pages_link_manifest_and_show_menu_without_hamburger(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, 'rel="manifest" href="%s"' % reverse("web_manifest"))
+        self.assertContains(response, "data-pwa-install")
+        self.assertNotContains(response, "navbar-toggler")
+        self.assertNotContains(response, "navbar-collapse")
+        # Phones get the short label so the menu wraps onto fewer rows.
+        self.assertContains(response, '<span class="d-lg-none">Closed</span>')
+        # A multi-line {# #} comment isn't a comment -- it renders as text.
+        self.assertNotContains(response, "{#")
 
 
 class RegistrationLocationTests(TestCase):
@@ -1224,6 +1282,18 @@ class MyPredictionsViewTests(TestCase):
         self.assertContains(response, "Hit")
         self.assertContains(response, "+10")
 
+    def test_decided_row_shows_kickoff_date(self):
+        match = self._match("dated")
+        Prediction.objects.create(user=self.alice, match=match, choice="A")
+        self._score(match, "A")
+
+        self.client.login(username="alice", password="pass12345")
+        response = self.client.get(self.url)
+
+        kickoff = timezone.localtime(match.start_time)
+        self.assertContains(response, "Kickoff Date")
+        self.assertContains(response, dateformat.format(kickoff, "N j, Y"))
+
     def test_incorrect_prediction_shows_miss_and_minus_five(self):
         match = self._match("miss")
         Prediction.objects.create(user=self.alice, match=match, choice="A")
@@ -1613,7 +1683,7 @@ class MonthlyLeaderboardTests(TestCase):
     def test_monthly_total_matches_this_months_scoring(self):
         alice = self._user("alice")
         bob = self._user("bob")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         Prediction.objects.create(user=bob, match=match, choice="B")
 
@@ -1627,7 +1697,7 @@ class MonthlyLeaderboardTests(TestCase):
 
     def test_rescoring_same_winner_does_not_double_count(self):
         alice = self._user("alice")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         match.winner = match.team_a
         match.save()
@@ -1641,7 +1711,7 @@ class MonthlyLeaderboardTests(TestCase):
     def test_winner_correction_adjusts_monthly_total_without_double_counting(self):
         alice = self._user("alice")
         bob = self._user("bob")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         Prediction.objects.create(user=bob, match=match, choice="B")
 
@@ -1664,7 +1734,7 @@ class MonthlyLeaderboardTests(TestCase):
 
     def test_clearing_winner_zeroes_out_the_monthly_total(self):
         alice = self._user("alice")
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         Prediction.objects.create(user=alice, match=match, choice="A")
         match.winner = match.team_a
         match.save()
@@ -1677,22 +1747,54 @@ class MonthlyLeaderboardTests(TestCase):
 
         self.assertEqual(self._monthly_totals()["alice"], 0)
 
-    def test_adjustment_dated_last_month_does_not_count_this_month(self):
+    def _last_months_match(self):
+        """(a match that kicked off mid last month, that month's 'YYYY-MM')."""
+        when = PastMonthLeaderboardTests._start_of_this_month() - timedelta(days=5)
+        return match_kicking_off(when), f"{when.year:04d}-{when.month:02d}"
+
+    def _totals_for(self, month):
+        response = self.client.get(reverse("leaderboard") + f"?month={month}")
+        return {
+            p.user.username: p.monthly_points
+            for p in response.context["monthly_profiles"]
+        }
+
+    @mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
+    def test_late_result_counts_in_kickoff_month(self):
+        # A match from last month whose result is only entered today.
         alice = self._user("alice")
-        match = future_match()
+        match, last_month = self._last_months_match()
         Prediction.objects.create(user=alice, match=match, choice="A")
         match.winner = match.team_a
         match.save()
         score_match(match.pk)
 
-        # Backdate the ledger row, as if this scoring had actually run last month.
-        ScoreAdjustment.objects.filter(user=alice, match=match).update(
-            created_at=timezone.now() - timedelta(days=40)
-        )
-
         self.assertEqual(self._monthly_totals().get("alice", 0), 0)
-        # All-time points are unaffected by which month the ledger row is dated.
+        self.assertEqual(self._totals_for(last_month)["alice"], POINTS_CORRECT)
         self.assertEqual(self._points(alice), POINTS_CORRECT)
+
+    @mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
+    def test_correction_counts_in_kickoff_month(self):
+        alice = self._user("alice")
+        bob = self._user("bob")
+        match, last_month = self._last_months_match()
+        Prediction.objects.create(user=alice, match=match, choice="A")
+        Prediction.objects.create(user=bob, match=match, choice="B")
+        match.winner = match.team_a
+        match.save()
+        score_match(match.pk)
+
+        match.refresh_from_db()
+        match.winner = match.team_b
+        match.save()
+        score_match(match.pk)
+
+        totals = self._totals_for(last_month)
+        self.assertEqual(totals["bob"], POINTS_CORRECT)
+        self.assertNotIn("alice", totals)  # net loser drops off the winners list
+        this_month = self._monthly_totals()
+        self.assertEqual(this_month["alice"], 0)
+        self.assertEqual(this_month["bob"], 0)
 
     def test_profile_with_no_activity_this_month_shows_zero(self):
         self._user("carol")
@@ -1714,8 +1816,12 @@ class MonthlyLeaderboardTests(TestCase):
         self.assertIn("India", row)
 
 
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
 class PastMonthLeaderboardTests(TestCase):
-    """?month=YYYY-MM on the Monthly board: past months show only the top 3."""
+    """?month=YYYY-MM on the Monthly board: past months show only the top 3.
+
+    The prediction-count floor is switched off (minimum 0) so these tests
+    only cover ranking; PastMonthMedalEligibilityTests covers the floor."""
 
     @staticmethod
     def _start_of_this_month():
@@ -1732,12 +1838,9 @@ class PastMonthLeaderboardTests(TestCase):
         user = User.objects.filter(username=username).first() or make_user(
             username, password="pass12345"
         )
-        adjustment = ScoreAdjustment.objects.create(
-            user=user, match=future_match(), delta=delta
-        )
-        if when is not None:
-            # auto_now_add ignores create(); backdate the ledger row directly.
-            ScoreAdjustment.objects.filter(pk=adjustment.pk).update(created_at=when)
+        # Points belong to the month the match kicked off.
+        match = match_kicking_off(when or timezone.now())
+        ScoreAdjustment.objects.create(user=user, match=match, delta=delta)
         return user
 
     def _monthly_names(self, month=None):
@@ -1835,6 +1938,107 @@ class PastMonthLeaderboardTests(TestCase):
         self.assertEqual(last_names, ["last_second"])
 
 
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 3)
+class PastMonthMedalEligibilityTests(TestCase):
+    """Past-month winners need MEDAL_MIN_PREDICTIONS predictions in that
+    month, from MEDAL_ELIGIBILITY_FIRST_MONTH onward."""
+
+    def setUp(self):
+        start = PastMonthLeaderboardTests._start_of_this_month()
+        self.when = start - timedelta(days=5)
+        self.month = f"{self.when.year:04d}-{self.when.month:02d}"
+        self.this_month = (self.when.year, self.when.month)
+
+    def _player(self, username, points, predictions):
+        user = make_user(username, password="pass12345")
+        ScoreAdjustment.objects.create(
+            user=user, match=match_kicking_off(self.when), delta=points
+        )
+        for _ in range(predictions):
+            Prediction.objects.create(
+                user=user, match=match_kicking_off(self.when), choice="A"
+            )
+        return user
+
+    def _winners(self):
+        response = self.client.get(reverse("leaderboard") + f"?month={self.month}")
+        return [
+            (p.user.username, p.medal) for p in response.context["monthly_profiles"]
+        ], response
+
+    def _setup_board(self):
+        self._player("casual", 90, 1)  # most points, too few predictions
+        self._player("first", 50, 3)
+        self._player("second", 40, 5)
+        self._player("third", 30, 3)
+        self._player("fourth", 20, 4)
+
+    def test_ineligible_player_is_skipped_and_next_moves_up(self):
+        self._setup_board()
+        with mock.patch(
+            "predictions.views.MEDAL_ELIGIBILITY_FIRST_MONTH", self.this_month
+        ):
+            winners, _ = self._winners()
+
+        self.assertEqual(
+            winners, [("first", "gold"), ("second", "silver"), ("third", "bronze")]
+        )
+
+    def test_months_before_the_rule_stay_rank_only(self):
+        self._setup_board()
+        next_month = (
+            (self.when.year + 1, 1)
+            if self.when.month == 12
+            else (self.when.year, self.when.month + 1)
+        )
+        with mock.patch("predictions.views.MEDAL_ELIGIBILITY_FIRST_MONTH", next_month):
+            winners, _ = self._winners()
+
+        self.assertEqual(
+            winners, [("casual", "gold"), ("first", "silver"), ("second", "bronze")]
+        )
+
+    def test_no_eligible_players_shows_no_winners_message(self):
+        self._player("casual", 90, 1)
+        with mock.patch(
+            "predictions.views.MEDAL_ELIGIBILITY_FIRST_MONTH", self.this_month
+        ):
+            winners, response = self._winners()
+
+        self.assertEqual(winners, [])
+        self.assertContains(response, "No winners recorded for this month.")
+
+
+class UserPredictionCountAdminTests(TestCase):
+    """Admin User Counts page counts this month's predictions by kickoff."""
+
+    def test_this_month_counts_by_match_kickoff(self):
+        admin_user = User.objects.create_superuser("boss", password="pass12345")
+        self.client.force_login(admin_user)
+        player = make_user("player", password="pass12345")
+        start = PastMonthLeaderboardTests._start_of_this_month()
+        # Made last month for a match kicking off this month -> this month.
+        upcoming = Prediction.objects.create(
+            user=player, match=match_kicking_off(start + timedelta(hours=1)), choice="A"
+        )
+        Prediction.objects.filter(pk=upcoming.pk).update(
+            created_at=start - timedelta(days=1)
+        )
+        # A match that kicked off last month -> not this month.
+        Prediction.objects.create(
+            user=player, match=match_kicking_off(start - timedelta(days=1)), choice="A"
+        )
+
+        response = self.client.get(
+            reverse("admin:predictions_userpredictioncount_changelist")
+        )
+        rows = {
+            row.user.username: row for row in response.context["cl"].result_list
+        }
+        self.assertEqual(rows["player"].predictions_month_count, 1)
+        self.assertEqual(rows["player"].predictions_alltime_count, 2)
+
+
 class VoucherAnnouncementTests(TestCase):
     """Temporary October-2026 voucher promo banner on the Monthly board."""
 
@@ -1850,11 +2054,13 @@ class VoucherAnnouncementTests(TestCase):
 
 
 @mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
 class LeaderboardMedalTests(TestCase):
     """Gold/silver/bronze medal images next to the top three rows only.
 
-    The 50-prediction medal floor is switched off (start day 32 never comes),
-    so these rank-only tests pass on any day of the month.
+    The prediction-count medal floor is switched off on both boards (start
+    day 32 never comes, minimum 0), so these rank-only tests pass on any day
+    of the month.
     """
 
     @staticmethod
@@ -1923,7 +2129,7 @@ class LeaderboardMedalTests(TestCase):
             make_user(f"m{index}", password="pass12345")
             for index in range(4)
         ]
-        match = future_match()
+        match = match_kicking_off(timezone.now())
         for user, delta in zip(users, (40, 30, 20, 10)):
             ScoreAdjustment.objects.create(user=user, match=match, delta=delta)
 
@@ -1950,6 +2156,64 @@ class LeaderboardMedalTests(TestCase):
             "gold.svg",
             "Gold medal — first place",
         )
+
+
+# Start day 32 never comes: the Monthly floor is off, so these tests also
+# prove the All-Time floor applies whatever the day of the month.
+@mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
+class AllTimeMedalEligibilityTests(TestCase):
+    """All-Time medals go to the top 3 among players with at least
+    MEDAL_MIN_PREDICTIONS predictions, on every day of the month."""
+
+    def setUp(self):
+        self.base_match = future_match()
+
+    def _player(self, username, points, predictions):
+        user = make_user(username, password="pass12345")
+        Profile.objects.filter(user=user).update(points=points)
+        base = self.base_match
+        matches = Match.objects.bulk_create(
+            Match(
+                sport=base.sport,
+                team_a=base.team_a,
+                team_b=base.team_b,
+                start_time=base.start_time,
+                prediction_deadline=base.prediction_deadline,
+                status=base.status,
+                is_published=True,
+            )
+            for _ in range(predictions)
+        )
+        Prediction.objects.bulk_create(
+            Prediction(user=user, match=match, choice="A") for match in matches
+        )
+        return user
+
+    def _medals(self):
+        response = self.client.get(reverse("leaderboard"))
+        return {
+            p.user.username: p.medal for p in response.context["all_time_profiles"]
+        }
+
+    def test_top_scorer_below_minimum_is_skipped(self):
+        self._player("casual", points=500, predictions=99)
+        self._player("first", points=300, predictions=100)
+        self._player("second", points=200, predictions=120)
+        self._player("third", points=100, predictions=100)
+
+        medals = self._medals()
+
+        self.assertIsNone(medals["casual"])
+        self.assertEqual(medals["first"], "gold")
+        self.assertEqual(medals["second"], "silver")
+        self.assertEqual(medals["third"], "bronze")
+
+    def test_note_is_shown_on_the_all_time_board(self):
+        content = self.client.get(reverse("leaderboard")).content.decode()
+        all_time = content[
+            content.index('id="leaderboard-all-time"'):content.index('id="leaderboard-monthly"')
+        ]
+        self.assertIn("Minimum of 100 Counts (Predictions)", all_time)
 
 
 def sport_match(sport_name, team_a_name="Team A", team_b_name="Team B", **kwargs):
@@ -2578,6 +2842,18 @@ class MatchAdminActionTests(TestCase):
         ids = json.loads(widget.attrs["data-autofill-points-sports"])
         self.assertCountEqual(ids, [tennis.pk, badminton.pk, cricket.pk])
         self.assertNotIn(football.pk, ids)
+
+    def test_lose_from_win_autofill_applies_only_to_football(self):
+        football, _ = Sport.objects.get_or_create(name="Football")
+        tennis, _ = Sport.objects.get_or_create(name="Tennis")
+        cricket, _ = Sport.objects.get_or_create(name="Cricket")
+        response = self.client.get(reverse("admin:predictions_match_add"))
+        widget = response.context["adminform"].form.fields["sport"].widget
+        widget = getattr(widget, "widget", widget)
+        ids = json.loads(widget.attrs["data-lose-from-win-sports"])
+        self.assertEqual(ids, [football.pk])
+        self.assertNotIn(tennis.pk, ids)
+        self.assertNotIn(cricket.pk, ids)
 
     def test_add_form_exposes_all_four_points_fields(self):
         response = self.client.get(reverse("admin:predictions_match_add"))
@@ -3540,16 +3816,11 @@ class IndiaTimeZoneTests(TestCase):
         from datetime import datetime, timezone as dt_timezone
 
         user = make_user("indian", password="pass12345")
-        match = future_match()
         # IST midnight on 1 Sept 2026 is 18:30 UTC on 31 Aug.
-        before = ScoreAdjustment.objects.create(user=user, match=match, delta=7)
-        inside = ScoreAdjustment.objects.create(user=user, match=match, delta=5)
-        ScoreAdjustment.objects.filter(pk=before.pk).update(
-            created_at=datetime(2026, 8, 31, 18, 0, tzinfo=dt_timezone.utc)
-        )
-        ScoreAdjustment.objects.filter(pk=inside.pk).update(
-            created_at=datetime(2026, 8, 31, 19, 0, tzinfo=dt_timezone.utc)
-        )
+        before = match_kicking_off(datetime(2026, 8, 31, 18, 0, tzinfo=dt_timezone.utc))
+        inside = match_kicking_off(datetime(2026, 8, 31, 19, 0, tzinfo=dt_timezone.utc))
+        ScoreAdjustment.objects.create(user=user, match=before, delta=7)
+        ScoreAdjustment.objects.create(user=user, match=inside, delta=5)
         fake_now = datetime(2026, 9, 15, 12, 0, tzinfo=dt_timezone.utc)
         for cookie in ("America/Los_Angeles", "Pacific/Auckland", "Asia/Kolkata"):
             with self.subTest(visitor_zone=cookie):
@@ -3633,7 +3904,69 @@ class AdminDateFormatTests(TestCase):
         when = datetime(2026, 3, 10, 10, 0, tzinfo=dt_timezone.utc)
         future_match(start_time=when, prediction_deadline=when)
         response = self.client.get(reverse("admin:predictions_match_changelist"))
-        self.assertContains(response, "10-Mar-2026, 15:30")
+        # The time sits on the line beneath the date.
+        self.assertContains(response, "10-Mar-2026<br>15:30")
+
+
+class AdminAddedByFilterTests(TestCase):
+    """The match list tells imported matches apart from manual ones."""
+
+    def setUp(self):
+        self.client.force_login(
+            User.objects.create_superuser("boss", password="pass12345")
+        )
+        future_match(event_name="Typed in by hand")
+        future_match(
+            event_name="From the feed", external_source="fake", external_id="e1"
+        )
+        self.url = reverse("admin:predictions_match_changelist")
+
+    def test_filter_manual(self):
+        response = self.client.get(self.url, {"added_by": "manual"})
+        self.assertContains(response, "Typed in by hand")
+        self.assertNotContains(response, "From the feed")
+
+    def test_filter_import(self):
+        response = self.client.get(self.url, {"added_by": "import"})
+        self.assertContains(response, "From the feed")
+        self.assertNotContains(response, "Typed in by hand")
+
+    def test_column_and_filter_row(self):
+        response = self.client.get(self.url)
+        self.assertContains(response, "Auto Import")
+        self.assertContains(response, "Filter by added by")
+
+
+class AdminMenuOrderTests(TestCase):
+    """The PREDICTIONS admin menu lists its models in a fixed order."""
+
+    def test_menu_order(self):
+        from django.contrib.admin import site
+        from django.test import RequestFactory
+
+        request = RequestFactory().get("/admin/")
+        request.user = User.objects.create_superuser("boss", password="pass12345")
+        app = next(
+            a for a in site.get_app_list(request) if a["app_label"] == "predictions"
+        )
+        self.assertEqual(
+            [m["name"] for m in app["models"]],
+            [
+                "Matches",
+                "Teams",
+                "Team name aliases",
+                "Sports",
+                "Profiles",
+                "User Counts",
+                "Predictions",
+                "Score adjustments",
+                "Referrals",
+                "Referral settings",
+                "Credit ledgers",
+                "Voucher redemptions",
+                "Push subscriptions",
+            ],
+        )
 
 
 class LoseDrawLabelTests(TestCase):
@@ -4637,3 +4970,465 @@ class SyncExternalMatchesCommandTests(TestCase):
         with mock.patch(f"{self.COMMAND_MODULE}.get_providers", return_value=[]):
             with self.assertRaises(CommandError):
                 call_command("sync_external_matches", "--results")
+
+
+def google_id_token(**overrides):
+    claims = {
+        "iss": "https://accounts.google.com",
+        "aud": "test-client-id",
+        "sub": "g-123",
+        "email": "Fan@Example.com",
+        "email_verified": True,
+        "name": "Arun Kumar",
+        "exp": int(timezone.now().timestamp()) + 3600,
+    }
+    claims.update(overrides)
+    payload = base64.urlsafe_b64encode(json.dumps(claims).encode()).rstrip(b"=")
+    return f"header.{payload.decode()}.signature"
+
+
+def google_token_response(status=200, **claims):
+    response = mock.Mock(status_code=status, text="")
+    response.json.return_value = {"id_token": google_id_token(**claims)}
+    return response
+
+
+@override_settings(
+    GOOGLE_CLIENT_ID="test-client-id", GOOGLE_CLIENT_SECRET="test-secret"
+)
+class GoogleSignInTests(TestCase):
+    def _start(self, **data):
+        response = self.client.post(reverse("google_start"), data)
+        self.assertEqual(response.status_code, 302)
+        self.assertTrue(response.url.startswith("https://accounts.google.com/"))
+        return self.client.session["google_oauth"]["state"]
+
+    def _callback(self, state=None, **claims):
+        with mock.patch(
+            "predictions.google_auth.requests.post",
+            return_value=google_token_response(**claims),
+        ) as post:
+            response = self.client.get(
+                reverse("google_callback"), {"state": state, "code": "abc"}
+            )
+        return response, post
+
+    def test_new_user_with_terms_is_created_and_logged_in(self):
+        referrer = make_user("referrer")
+        code = referrer.profile.referral_code
+        state = self._start(accept_terms="on", ref=code)
+
+        response, post = self._callback(state)
+
+        self.assertRedirects(response, reverse("match_list"))
+        user = User.objects.get(email="fan@example.com")
+        self.assertEqual(user.username, "ArunKumar")
+        self.assertFalse(user.has_usable_password())
+        self.assertEqual(user.profile.google_sub, "g-123")
+        self.assertEqual(Referral.objects.get(referred_user=user).referrer, referrer)
+        self.assertEqual(int(self.client.session["_auth_user_id"]), user.pk)
+        self.assertEqual(post.call_args.kwargs["data"]["code"], "abc")
+
+    def test_username_clash_gets_a_number(self):
+        make_user("arunkumar")
+        state = self._start(accept_terms="on")
+        self._callback(state)
+        self.assertTrue(User.objects.filter(username="ArunKumar2").exists())
+
+    def test_blank_name_falls_back_to_player(self):
+        state = self._start(accept_terms="on")
+        self._callback(state, name="")
+        self.assertTrue(User.objects.filter(username="Player").exists())
+
+    def test_new_user_without_terms_is_sent_to_register_then_finishes(self):
+        state = self._start()
+        response, _ = self._callback(state)
+
+        self.assertRedirects(response, reverse("register"))
+        self.assertFalse(User.objects.filter(email="fan@example.com").exists())
+        page = self.client.get(reverse("register"))
+        self.assertContains(page, "fan@example.com")
+
+        # Ticking the box finishes signup without another trip to Google.
+        response = self.client.post(reverse("google_start"), {"accept_terms": "on"})
+        self.assertRedirects(response, reverse("match_list"))
+        user = User.objects.get(email="fan@example.com")
+        self.assertEqual(user.profile.google_sub, "g-123")
+        self.assertNotIn("google_pending", self.client.session)
+
+    def test_existing_user_is_linked_by_email(self):
+        alice = make_user("alice", email="fan@example.com", password="pass12345")
+        state = self._start()  # from Log in: no terms needed for an account
+        response, _ = self._callback(state)
+        self.assertRedirects(response, reverse("match_list"))
+        alice.profile.refresh_from_db()
+        self.assertEqual(alice.profile.google_sub, "g-123")
+        self.assertEqual(int(self.client.session["_auth_user_id"]), alice.pk)
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_existing_user_is_found_by_google_id_after_email_change(self):
+        alice = make_user("alice", email="new@example.com")
+        Profile.objects.filter(user=alice).update(google_sub="g-123")
+        state = self._start()
+        self._callback(state, email="old@example.com")
+        self.assertEqual(int(self.client.session["_auth_user_id"]), alice.pk)
+        self.assertEqual(User.objects.count(), 1)
+
+    def test_next_is_followed_after_login(self):
+        make_user("alice", email="fan@example.com")
+        state = self._start(next="/leaderboard/")
+        response, _ = self._callback(state)
+        self.assertRedirects(response, "/leaderboard/")
+
+    def test_offsite_next_is_ignored(self):
+        make_user("alice", email="fan@example.com")
+        state = self._start(next="https://evil.example/")
+        response, _ = self._callback(state)
+        self.assertRedirects(response, reverse("match_list"))
+
+    def test_state_mismatch_is_rejected(self):
+        self._start(accept_terms="on")
+        response, post = self._callback("wrong-state")
+        self.assertRedirects(response, reverse("login"))
+        post.assert_not_called()
+        self.assertFalse(User.objects.exists())
+
+    def test_bad_tokens_are_rejected(self):
+        for claims in (
+            {"email_verified": False},
+            {"aud": "someone-else"},
+            {"iss": "https://evil.example"},
+            {"exp": 1},
+        ):
+            with self.subTest(claims=claims):
+                state = self._start(accept_terms="on")
+                response, _ = self._callback(state, **claims)
+                self.assertRedirects(response, reverse("login"))
+                self.assertFalse(User.objects.exists())
+
+    def test_cancelled_at_google(self):
+        self._start()
+        response = self.client.get(reverse("google_callback"), {"error": "access_denied"})
+        self.assertRedirects(response, reverse("login"))
+
+    def test_inactive_user_is_refused(self):
+        make_user("alice", email="fan@example.com", is_active=False)
+        state = self._start()
+        response, _ = self._callback(state)
+        self.assertRedirects(response, reverse("login"))
+        self.assertNotIn("_auth_user_id", self.client.session)
+
+    def test_buttons_show_on_login_and_register(self):
+        self.assertContains(self.client.get(reverse("login")), "Continue with Google")
+        register = self.client.get(reverse("register") + "?ref=ABC")
+        self.assertContains(register, "Continue with Google")
+        self.assertContains(register, 'name="accept_terms" id="google_accept_terms"')
+        self.assertContains(register, '<input type="hidden" name="ref" value="ABC">')
+
+    def test_password_change_page_explains_google_accounts(self):
+        user = User.objects.create_user("g", email="g@example.com")
+        self.client.force_login(user)
+        response = self.client.get(reverse("password_change"))
+        self.assertContains(response, "You sign in with Google")
+
+
+class AccountLocationTests(TestCase):
+    """Optional Country / State on My Account (for Google sign-ups)."""
+
+    def setUp(self):
+        self.user = User.objects.create_user("g", email="g@example.com")
+        self.client.force_login(self.user)
+
+    def _save(self, **data):
+        return self.client.post(reverse("my_account"), data)
+
+    def test_card_is_shown_and_prefilled(self):
+        Profile.objects.filter(user=self.user).update(country="India", state="Kerala")
+        response = self.client.get(reverse("my_account"))
+        self.assertContains(response, "Your location")
+        self.assertEqual(response.context["location_form"]["state"].value(), "Kerala")
+
+    def test_saving_updates_profile_and_leaderboard(self):
+        response = self._save(country="India", state="Kerala")
+        self.assertRedirects(response, reverse("my_account"))
+        self.user.profile.refresh_from_db()
+        self.assertEqual(
+            (self.user.profile.country, self.user.profile.state), ("India", "Kerala")
+        )
+        self.assertContains(self.client.get(reverse("leaderboard")), "Kerala")
+
+    def test_both_may_be_left_blank(self):
+        Profile.objects.filter(user=self.user).update(country="India", state="Kerala")
+        response = self._save(country="", state="")
+        self.assertRedirects(response, reverse("my_account"))
+        self.user.profile.refresh_from_db()
+        self.assertEqual((self.user.profile.country, self.user.profile.state), ("", ""))
+
+    def test_state_must_belong_to_the_country(self):
+        other_country = next(c for c in STATES_BY_COUNTRY if c != "India")
+        for data in (
+            {"country": other_country, "state": "Kerala"},
+            {"country": "", "state": "Kerala"},
+        ):
+            with self.subTest(data=data):
+                response = self._save(**data)
+                self.assertEqual(response.status_code, 200)
+                self.assertIn("state", response.context["location_form"].errors)
+        self.user.profile.refresh_from_db()
+        self.assertEqual(self.user.profile.state, "")
+
+    def test_unknown_country_is_rejected(self):
+        response = self._save(country="Atlantis", state="")
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("country", response.context["location_form"].errors)
+
+    def test_change_password_button_hidden_for_google_only_accounts(self):
+        response = self.client.get(reverse("my_account"))
+        self.assertNotContains(response, reverse("password_change"))
+
+
+@override_settings(GOOGLE_CLIENT_ID="", GOOGLE_CLIENT_SECRET="")
+class GoogleSignInDisabledTests(TestCase):
+    def test_no_button_and_urls_404(self):
+        self.assertNotContains(self.client.get(reverse("login")), "Continue with Google")
+        self.assertEqual(self.client.post(reverse("google_start")).status_code, 404)
+        self.assertEqual(self.client.get(reverse("google_callback")).status_code, 404)
+
+
+PUSH_KEYS = {
+    "VAPID_PUBLIC_KEY": "test-public-key",
+    "VAPID_PRIVATE_KEY": "test-private-key",
+    "VAPID_SUBJECT": "mailto:admin@example.com",
+}
+
+
+def make_subscription(user, n=1):
+    return PushSubscription.objects.create(
+        user=user,
+        endpoint=f"https://push.example.com/{user.username}/{n}",
+        p256dh="p256dh-key",
+        auth="auth-key",
+    )
+
+
+@override_settings(**PUSH_KEYS)
+class MatchAlertTests(TestCase):
+    """predictions.push: alerts and the app-icon number on publish."""
+
+    def setUp(self):
+        self.alice = make_user("alice", password="StrongPass123")
+        self.bob = make_user("bob", password="StrongPass123")
+        self.alice_device = make_subscription(self.alice)
+        self.bob_device = make_subscription(self.bob)
+
+    def sent(self, mocked):
+        """{endpoint: payload} for each webpush() call."""
+        return {
+            call.kwargs["subscription_info"]["endpoint"]: json.loads(call.kwargs["data"])
+            for call in mocked.call_args_list
+        }
+
+    def test_each_user_gets_their_own_unpredicted_count(self):
+        old = sport_match("Football", "Old A", "Old B", is_published=True)
+        Prediction.objects.create(user=self.bob, match=old, choice="A")
+        new = sport_match("Cricket", "New A", "New B", is_published=True)
+        with mock.patch("predictions.push.webpush") as webpush:
+            notified = push.notify_new_matches([new.pk])
+        self.assertEqual(notified, 2)
+        sent = self.sent(webpush)
+        self.assertEqual(sent[self.alice_device.endpoint]["count"], 2)
+        self.assertEqual(sent[self.bob_device.endpoint]["count"], 1)
+        self.assertEqual(
+            sent[self.alice_device.endpoint]["body"], "2 matches waiting for your prediction"
+        )
+        self.assertEqual(
+            sent[self.bob_device.endpoint]["body"], "1 match waiting for your prediction"
+        )
+        self.alice_device.refresh_from_db()
+        self.assertIsNotNone(self.alice_device.last_sent_at)
+
+    def test_user_who_already_predicted_new_match_is_skipped(self):
+        new = sport_match("Football", "Pre A", "Pre B", is_published=True)
+        Prediction.objects.create(user=self.bob, match=new, choice="A")
+        with mock.patch("predictions.push.webpush") as webpush:
+            push.notify_new_matches([new.pk])
+        self.assertEqual(list(self.sent(webpush)), [self.alice_device.endpoint])
+
+    def test_nothing_sent_for_unpublished_or_closed_matches(self):
+        hidden = sport_match("Football", "Hid A", "Hid B", is_published=False)
+        closed = sport_match(
+            "Football", "Clo A", "Clo B", is_published=True,
+            prediction_deadline=timezone.now() - timedelta(minutes=1),
+        )
+        with mock.patch("predictions.push.webpush") as webpush:
+            self.assertEqual(push.notify_new_matches([hidden.pk, closed.pk]), 0)
+        webpush.assert_not_called()
+
+    @override_settings(VAPID_PRIVATE_KEY="")
+    def test_disabled_without_keys(self):
+        new = sport_match("Football", "Off A", "Off B", is_published=True)
+        with mock.patch("predictions.push.webpush") as webpush:
+            self.assertEqual(push.notify_new_matches([new.pk]), 0)
+        webpush.assert_not_called()
+
+    def test_gone_device_is_deleted_other_errors_kept(self):
+        new = sport_match("Football", "Gone A", "Gone B", is_published=True)
+
+        def fail(subscription_info, **kwargs):
+            gone = subscription_info["endpoint"] == self.alice_device.endpoint
+            response = mock.Mock(status_code=410 if gone else 500)
+            raise WebPushException("failed", response=response)
+
+        with mock.patch("predictions.push.webpush", side_effect=fail):
+            self.assertEqual(push.notify_new_matches([new.pk]), 0)
+        self.assertFalse(PushSubscription.objects.filter(pk=self.alice_device.pk).exists())
+        self.assertTrue(PushSubscription.objects.filter(pk=self.bob_device.pk).exists())
+
+
+@override_settings(**PUSH_KEYS)
+class MatchAlertAdminTests(TestCase):
+    """Publishing in the admin sends alerts for newly published matches only."""
+
+    def setUp(self):
+        User.objects.create_superuser("root", "root@example.com", "pass12345")
+        self.client.login(username="root", password="pass12345")
+        # Run the "background" work inline, and record what would be sent.
+        mock.patch(
+            "predictions.push._run_in_background", side_effect=lambda f, *a: f(*a)
+        ).start()
+        mock.patch("predictions.push.connection").start()
+        self.notify = mock.patch("predictions.push.notify_new_matches").start()
+        self.addCleanup(mock.patch.stopall)
+
+    def save(self, match, changed_data, change=True):
+        with self.captureOnCommitCallbacks(execute=True), \
+                mock.patch("predictions.admin.score_match", return_value=False):
+            MatchAdmin(Match, AdminSite()).save_model(
+                RequestFactory().post("/"), match, mock.Mock(changed_data=changed_data), change
+            )
+
+    def test_publish_action_notifies_newly_published_only(self):
+        hidden = sport_match("Football", "Act A", "Act B", is_published=False)
+        already = sport_match("Football", "Act C", "Act D", is_published=True)
+        with self.captureOnCommitCallbacks(execute=True):
+            self.client.post(
+                reverse("admin:predictions_match_changelist"),
+                {"action": "publish_matches", "_selected_action": [hidden.pk, already.pk]},
+            )
+        self.notify.assert_called_once_with([hidden.pk])
+
+    def test_ticking_published_on_change_form_notifies(self):
+        match = sport_match("Football", "Frm A", "Frm B", is_published=False)
+        match.is_published = True
+        self.save(match, ["is_published"])
+        self.notify.assert_called_once_with([match.pk])
+
+    def test_adding_published_match_notifies(self):
+        match = sport_match("Football", "New C", "New D", is_published=True)
+        self.save(match, [], change=False)
+        self.notify.assert_called_once_with([match.pk])
+
+    def test_editing_already_published_match_does_not_notify(self):
+        match = sport_match("Football", "Edt A", "Edt B", is_published=True)
+        self.save(match, ["event_name"])
+        self.notify.assert_not_called()
+
+
+@override_settings(**PUSH_KEYS)
+class PushSubscriptionViewTests(TestCase):
+    def setUp(self):
+        self.user = make_user("sub", password="StrongPass123")
+        self.client.login(username="sub", password="StrongPass123")
+        self.body = {
+            "endpoint": "https://push.example.com/abc",
+            "keys": {"p256dh": "key1", "auth": "auth1"},
+        }
+
+    def post(self, name, body):
+        return self.client.post(
+            reverse(name), json.dumps(body), content_type="application/json"
+        )
+
+    def test_subscribe_saves_and_moves_device_to_current_user(self):
+        other = make_user("other")
+        PushSubscription.objects.create(
+            user=other, endpoint=self.body["endpoint"], p256dh="x", auth="y"
+        )
+        response = self.post("push_subscribe", self.body)
+        self.assertEqual(response.status_code, 200)
+        subscription = PushSubscription.objects.get()
+        self.assertEqual(subscription.user, self.user)
+        self.assertEqual(subscription.auth, "auth1")
+
+    def test_subscribe_rejects_bad_data(self):
+        bad_bodies = (
+            {},
+            {"endpoint": "http://insecure", "keys": {"p256dh": "a", "auth": "b"}},
+        )
+        for body in bad_bodies:
+            with self.subTest(body=body):
+                self.assertEqual(self.post("push_subscribe", body).status_code, 400)
+        self.assertFalse(PushSubscription.objects.exists())
+
+    def test_subscribe_needs_login(self):
+        self.client.logout()
+        self.post("push_subscribe", self.body)
+        self.assertFalse(PushSubscription.objects.exists())
+
+    @override_settings(VAPID_PUBLIC_KEY="")
+    def test_subscribe_404_when_alerts_off(self):
+        self.assertEqual(self.post("push_subscribe", self.body).status_code, 404)
+
+    def test_unsubscribe(self):
+        self.post("push_subscribe", self.body)
+        self.post("push_unsubscribe", {"endpoint": self.body["endpoint"]})
+        self.assertFalse(PushSubscription.objects.exists())
+
+    def test_logout_forgets_this_device(self):
+        make_subscription(self.user, n=2)
+        self.post("push_subscribe", self.body)
+        self.client.post(reverse("logout"), {"push_endpoint": self.body["endpoint"]})
+        self.assertEqual(
+            list(PushSubscription.objects.values_list("endpoint", flat=True)),
+            ["https://push.example.com/sub/2"],
+        )
+
+    def test_page_carries_badge_count_and_alerts_button(self):
+        sport_match("Football", "Bdg A", "Bdg B", is_published=True)
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, 'data-badge-count="1"')
+        self.assertContains(response, 'data-vapid-key="test-public-key"')
+        self.assertContains(response, "data-push-enable")
+
+    def test_blocked_button_and_help_for_each_device(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, "data-push-blocked")
+        self.assertContains(response, 'id="push-blocked-modal"')
+        for device in ("android", "ios", "desktop"):
+            with self.subTest(device=device):
+                self.assertContains(response, f'data-push-help="{device}"')
+
+    def test_no_blocked_help_when_logged_out(self):
+        self.client.logout()
+        response = self.client.get(reverse("match_list"))
+        self.assertNotContains(response, 'id="push-blocked-modal"')
+
+    @override_settings(VAPID_PUBLIC_KEY="")
+    def test_no_alerts_key_when_alerts_off(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertNotContains(response, "data-vapid-key")
+        self.assertNotContains(response, 'id="push-blocked-modal"')
+        self.assertContains(response, 'data-badge-count="0"')
+
+    def test_service_worker_handles_push(self):
+        response = self.client.get("/sw.js")
+        self.assertContains(response, 'addEventListener("push"')
+        self.assertContains(response, "setAppBadge")
+
+    def test_generate_vapid_keys_command(self):
+        out = StringIO()
+        call_command("generate_vapid_keys", stdout=out)
+        lines = dict(line.split("=", 1) for line in out.getvalue().split())
+        public = base64.urlsafe_b64decode(lines["VAPID_PUBLIC_KEY"] + "==")
+        private = base64.urlsafe_b64decode(lines["VAPID_PRIVATE_KEY"] + "=")
+        self.assertEqual((len(public), len(private)), (65, 32))

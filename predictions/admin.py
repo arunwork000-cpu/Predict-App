@@ -5,14 +5,16 @@ from django import forms
 from django.contrib import admin, messages
 from django.core.exceptions import ValidationError
 from django.db.models import Count, Q
-from django.utils import timezone
+from django.utils import formats, timezone
 from django.utils.html import format_html
 
+from . import push
 from .models import (
     CreditLedger,
     Match,
     Prediction,
     Profile,
+    PushSubscription,
     Referral,
     ReferralSettings,
     ScoreAdjustment,
@@ -70,11 +72,21 @@ class ProfileAdmin(admin.ModelAdmin):
     # country/state stay editable (not in readonly_fields) so an admin can
     # correct a legacy account that has none, or fix a typo. points/credits
     # and referral_code are system-managed -- see services.py.
-    list_display = ("user", "points", "credits", "referral_code", "age", "state", "country")
+    list_display = (
+        "user", "points", "credits", "referral_code", "age", "state", "country",
+        "uses_google",
+    )
     list_filter = ("country",)
     search_fields = ("user__username", "state", "country", "referral_code")
-    readonly_fields = ("user", "points", "credits", "referral_code")
-    fields = ("user", "points", "credits", "referral_code", "age", "country", "state")
+    readonly_fields = ("user", "points", "credits", "referral_code", "google_sub")
+    fields = (
+        "user", "points", "credits", "referral_code", "age", "country", "state",
+        "google_sub",
+    )
+
+    @admin.display(boolean=True, description="Google")
+    def uses_google(self, obj):
+        return bool(obj.google_sub)
 
 
 def _int_or_none(value):
@@ -86,6 +98,9 @@ def _int_or_none(value):
 
 # Sports whose admin points fields follow a 100-point split (see match_points.js).
 POINTS_AUTOFILL_SPORTS = ("Tennis", "Badminton", "Cricket")
+# Sports whose lose points are filled from the win points as win - 100, for
+# Team A, Team B and Draw separately (see match_points.js).
+LOSE_FROM_WIN_SPORTS = ("Football",)
 
 
 class MatchAdminForm(forms.ModelForm):
@@ -149,6 +164,13 @@ class MatchAdminForm(forms.ModelForm):
                 )
             )
         )
+        sport_widget.attrs["data-lose-from-win-sports"] = json.dumps(
+            list(
+                Sport.objects.filter(name__in=LOSE_FROM_WIN_SPORTS).values_list(
+                    "id", flat=True
+                )
+            )
+        )
 
         # Django derives "Team a ..." from the field names; capitalise A/B.
         for name, field in self.fields.items():
@@ -190,6 +212,21 @@ class PublishedFilter(admin.SimpleListFilter):
         return queryset
 
 
+class AddedByFilter(admin.SimpleListFilter):
+    title = "added by"
+    parameter_name = "added_by"
+
+    def lookups(self, request, model_admin):
+        return (("import", "Automatic import"), ("manual", "Manual"))
+
+    def queryset(self, request, queryset):
+        if self.value() == "import":
+            return queryset.exclude(external_id="")
+        if self.value() == "manual":
+            return queryset.filter(external_id="")
+        return queryset
+
+
 @admin.register(Match)
 class MatchAdmin(admin.ModelAdmin):
     form = MatchAdminForm
@@ -209,16 +246,18 @@ class MatchAdmin(admin.ModelAdmin):
         "sport",
         "event_name",
         "status",
-        "start_time",
-        "prediction_deadline",
+        "start_time_display",
+        "prediction_deadline_display",
         "winner",
         "is_draw",
         "suggested_result",
         "is_published",
         "is_scored",
+        "added_by",
     )
     list_filter = (
         PublishedFilter,
+        AddedByFilter,
         "sport",
         "status",
         SuggestedResultFilter,
@@ -233,24 +272,41 @@ class MatchAdmin(admin.ModelAdmin):
     change_list_template = "admin/predictions/match/change_list.html"
 
     def changelist_view(self, request, extra_context=None):
-        # Links for the "Filter by publication" row under the date hierarchy.
-        # Each keeps the other active filters and drops the page number.
-        current = request.GET.get(PublishedFilter.parameter_name, "")
+        # Links for the "Filter by ..." rows under the date hierarchy.
+        extra_context = {
+            **(extra_context or {}),
+            "publication_links": self._filter_links(
+                request,
+                PublishedFilter.parameter_name,
+                (("", "All"), ("yes", "Published"), ("no", "To be published")),
+            ),
+            "added_by_links": self._filter_links(
+                request,
+                AddedByFilter.parameter_name,
+                (("", "All"), ("import", "Automatic import"), ("manual", "Manual")),
+            ),
+        }
+        return super().changelist_view(request, extra_context=extra_context)
+
+    @staticmethod
+    def _filter_links(request, parameter_name, choices):
+        """One link per choice. Each keeps the other active filters and
+        drops the page number."""
+        current = request.GET.get(parameter_name, "")
         links = []
-        for value, title in (("", "All"), ("yes", "Published"), ("no", "To be published")):
+        for value, title in choices:
             params = request.GET.copy()
             params.pop("p", None)
-            params.pop(PublishedFilter.parameter_name, None)
+            params.pop(parameter_name, None)
             if value:
-                params[PublishedFilter.parameter_name] = value
+                params[parameter_name] = value
             query = params.urlencode()
             links.append({
                 "title": title,
                 "link": f"?{query}" if query else "?",
                 "selected": value == current,
             })
-        extra_context = {**(extra_context or {}), "publication_links": links}
-        return super().changelist_view(request, extra_context=extra_context)
+        return links
     # is_scored is managed by the scoring service. winner stays editable even
     # after scoring so a mistaken result can be corrected (score_match then
     # reconciles the points).
@@ -297,7 +353,9 @@ class MatchAdmin(admin.ModelAdmin):
                 "Enter 0 in both Draw fields if the match cannot end in a draw: "
                 "the Draw box is then hidden and users pick only Team A or Team B. "
                 "For Tennis, Badminton and Cricket, entering Team A win points fills the other "
-                "fields (100-point split); all stay editable."
+                "fields (100-point split); all stay editable. "
+                "For Football, entering a win points field fills its lose points "
+                "as win - 100 (e.g. 60 gives -40); still editable."
             ),
         }),
     )
@@ -315,7 +373,12 @@ class MatchAdmin(admin.ModelAdmin):
 
     @admin.action(description="Publish selected matches")
     def publish_matches(self, request, queryset):
+        newly_published = list(
+            queryset.filter(is_published=False).values_list("pk", flat=True)
+        )
         updated = queryset.update(is_published=True)
+        # Users with match alerts on get one notification for the batch.
+        push.notify_new_matches_later(newly_published)
         self.message_user(request, f"{updated} match(es) published.", messages.SUCCESS)
 
     @admin.action(description="Unpublish selected matches")
@@ -330,6 +393,32 @@ class MatchAdmin(admin.ModelAdmin):
         if obj.suggested_is_draw:
             return "Draw"
         return str(obj.suggested_winner) if obj.suggested_winner_id else "-"
+
+    @staticmethod
+    def _date_over_time(value):
+        """The date with the time on the line beneath it (same formats as
+        DATETIME_FORMAT in config/formats/en/formats.py)."""
+        if value is None:
+            return "-"
+        value = timezone.localtime(value)
+        return format_html(
+            "{}<br>{}",
+            formats.date_format(value, "DATE_FORMAT"),
+            formats.time_format(value, "H:i"),
+        )
+
+    @admin.display(description="Start time", ordering="start_time")
+    def start_time_display(self, obj):
+        return self._date_over_time(obj.start_time)
+
+    @admin.display(description="Prediction deadline", ordering="prediction_deadline")
+    def prediction_deadline_display(self, obj):
+        return self._date_over_time(obj.prediction_deadline)
+
+    @admin.display(description="Added by", ordering="external_id")
+    def added_by(self, obj):
+        """Imported matches carry the provider's event id; manual ones don't."""
+        return "Auto Import" if obj.external_id else "Manual"
 
     @admin.action(description="Confirm suggested results (scores predictions)")
     def confirm_suggested_results(self, request, queryset):
@@ -352,6 +441,9 @@ class MatchAdmin(admin.ModelAdmin):
 
     def save_model(self, request, obj, form, change):
         super().save_model(request, obj, form, change)
+        changed = getattr(form, "changed_data", ())
+        if obj.is_published and (not change or "is_published" in changed):
+            push.notify_new_matches_later([obj.pk])
         # score_match reconciles in every direction (first scoring, winner
         # correction, winner cleared) and safely no-ops for an unscored match
         # with no winner, so it is called on every save.
@@ -471,6 +563,22 @@ class CreditLedgerAdmin(admin.ModelAdmin):
         return False
 
 
+@admin.register(PushSubscription)
+class PushSubscriptionAdmin(admin.ModelAdmin):
+    """Devices with match alerts turned on. Read-only: devices add
+    themselves; deleting one stops alerts to that device."""
+
+    list_display = ("user", "created_at", "last_sent_at")
+    search_fields = ("user__username",)
+    readonly_fields = ("user", "endpoint", "p256dh", "auth", "created_at", "last_sent_at")
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+
 def _current_month_range():
     """[start, end) for the current calendar month in the site's default
     timezone -- same convention as the monthly leaderboard (views._monthly_profiles)."""
@@ -511,8 +619,9 @@ class UserPredictionCountAdmin(admin.ModelAdmin):
                 predictions_month_count=Count(
                     "user__predictions",
                     filter=Q(
-                        user__predictions__created_at__gte=start,
-                        user__predictions__created_at__lt=end,
+                        # Kickoff month, as the leaderboard medal floor counts it.
+                        user__predictions__match__start_time__gte=start,
+                        user__predictions__match__start_time__lt=end,
                     ),
                 ),
                 predictions_alltime_count=Count("user__predictions"),
@@ -536,20 +645,40 @@ class UserPredictionCountAdmin(admin.ModelAdmin):
         return obj.predictions_alltime_count
 
 
-# "User Counts" reuses Profile's data as a proxy model, so it lands wherever
-# Django's default alphabetical admin ordering puts it. Voucher redemptions is
-# currently the last entry in this app, so pinning UserPredictionCount to the
-# end (a stable sort -- everything else keeps its existing order) puts it
-# directly below.
+# The PREDICTIONS menu in the admin sidebar follows this order instead of
+# Django's default alphabetical one. A model missing from the list goes last
+# (a stable sort keeps those in their alphabetical order).
+PREDICTIONS_MENU_ORDER = (
+    "Match",
+    "Team",
+    "TeamAlias",
+    "Sport",
+    "Profile",
+    "UserPredictionCount",
+    "Prediction",
+    "ScoreAdjustment",
+    "Referral",
+    "ReferralSettings",
+    "CreditLedger",
+    "VoucherRedemption",
+    "PushSubscription",
+)
+
 _default_get_app_list = admin.site.get_app_list
 
 
-def _get_app_list_user_counts_last(self, request, app_label=None):
+def _get_app_list_in_menu_order(self, request, app_label=None):
     app_list = _default_get_app_list(request, app_label)
     for app in app_list:
         if app["app_label"] == "predictions":
-            app["models"].sort(key=lambda m: m["object_name"] == "UserPredictionCount")
+            app["models"].sort(
+                key=lambda m: (
+                    PREDICTIONS_MENU_ORDER.index(m["object_name"])
+                    if m["object_name"] in PREDICTIONS_MENU_ORDER
+                    else len(PREDICTIONS_MENU_ORDER)
+                )
+            )
     return app_list
 
 
-admin.site.get_app_list = _get_app_list_user_counts_last.__get__(admin.site)
+admin.site.get_app_list = _get_app_list_in_menu_order.__get__(admin.site)

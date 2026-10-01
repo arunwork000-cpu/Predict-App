@@ -3,7 +3,9 @@
 {% block content %}
 <div class="d-flex justify-content-between align-items-center mb-3">
   <h1 class="h3 mb-0">My Account</h1>
-  <a class="btn btn-outline-secondary btn-sm" href="{% url 'password_change' %}">Change password</a>
+  {% if user.has_usable_password %}
+    <a class="btn btn-outline-secondary btn-sm" href="{% url 'password_change' %}">Change password</a>
+  {% endif %}
 </div>
 
 <div class="card mb-4">
@@ -26,6 +28,30 @@
         <div class="small text-muted">This month's rank</div>
       </div>
     </div>
+  </div>
+</div>
+
+<div class="card mb-4">
+  <div class="card-body">
+    <h2 class="h5">Your location <span class="fs-6 fw-normal text-muted">(optional)</span></h2>
+    <p class="text-muted">Shown next to your name on the leaderboard. Leave blank to show nothing.</p>
+    <form method="post" action="{% url 'my_account' %}">
+      {% csrf_token %}
+      <div class="row g-3 align-items-end">
+        {% for field in location_form %}
+          <div class="col-md-5">
+            <label class="form-label" for="{{ field.id_for_label }}">{{ field.label }}</label>
+            {{ field }}
+            {% if field.errors %}
+              <div class="text-danger small">{{ field.errors }}</div>
+            {% endif %}
+          </div>
+        {% endfor %}
+        <div class="col-md-2">
+          <button type="submit" class="btn btn-primary w-100">Save</button>
+        </div>
+      </div>
+    </form>
   </div>
 </div>
 
@@ -140,4 +166,5 @@
     });
   })();
 </script>
+{% include "predictions/_state_dropdown_js.html" %}
 {% endblock %}

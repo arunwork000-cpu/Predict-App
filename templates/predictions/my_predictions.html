@@ -39,10 +39,11 @@
 <h2 class="h5 mt-4">Decided</h2>
 {% if decided %}
   <div class="table-responsive">
-    <table class="table table-striped bg-white align-middle">
+    <table class="table table-striped bg-white align-middle decided-table">
       <thead>
         <tr>
           <th scope="col">Match</th>
+          <th scope="col">Kickoff Date</th>
           <th scope="col">Your pick</th>
           <th scope="col">Result</th>
           <th scope="col">Outcome</th>
@@ -52,9 +53,10 @@
       <tbody>
         {% for p in decided %}
           <tr>
-            <td>{% team_flag p.match.team_a %}{{ p.match.team_a }} vs {% team_flag p.match.team_b %}{{ p.match.team_b }}</td>
-            <td>{{ p.choice_name }}</td>
-            <td>{{ p.match.winner_name }}</td>
+            <td><div class="cell-wrap">{% team_flag p.match.team_a %}{{ p.match.team_a }} vs {% team_flag p.match.team_b %}{{ p.match.team_b }}</div></td>
+            <td class="text-nowrap">{{ p.match.start_time|date:"N j, Y" }}</td>
+            <td><div class="cell-wrap">{{ p.choice_name }}</div></td>
+            <td><div class="cell-wrap">{{ p.match.winner_name }}</div></td>
             <td>
               {% if p.is_correct %}
                 <span class="badge text-bg-success">Hit</span>

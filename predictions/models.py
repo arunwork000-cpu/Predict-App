@@ -60,6 +60,15 @@ class Profile(models.Model):
         editable=False,
         default="",
     )
+    # Google's permanent account ID ("sub") once the user has signed in with
+    # Google; null for accounts that never have. See google_auth.py.
+    google_sub = models.CharField(
+        max_length=255,
+        null=True,
+        blank=True,
+        unique=True,
+        editable=False,
+    )
 
     class Meta:
         ordering = ["-points", "user__username"]
@@ -450,7 +459,8 @@ class ScoreAdjustment(models.Model):
     scoring, a winner correction, or clearing a winner) -- the *delta*, not
     the absolute award, so summing these never double-counts a re-score.
     Profile.points is always the all-time total; summing this ledger's rows
-    created within the current calendar month gives the monthly leaderboard.
+    for matches that kicked off (``match.start_time``) within a calendar
+    month gives that month's leaderboard, whenever the result was entered.
     """
 
     user = models.ForeignKey(
@@ -657,3 +667,26 @@ class StoredFile(models.Model):
 
     def __str__(self):
         return self.name
+
+
+class PushSubscription(models.Model):
+    """A browser/app install that turned on match alerts (see
+    predictions.push). One user can have several (phone, laptop)."""
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="push_subscriptions",
+    )
+    # The push service URL (Google, Apple or Mozilla) for this install.
+    endpoint = models.CharField(max_length=1000, unique=True)
+    p256dh = models.CharField(max_length=200)
+    auth = models.CharField(max_length=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+    last_sent_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self):
+        return f"{self.user} ({self.endpoint[:40]}...)"
