@@ -1574,6 +1574,7 @@ class LeaderboardViewTests(TestCase):
             [("carol", 30), ("alice", 10), ("bob", -5)],
         )
         content = response.content.decode()
+        content = content[content.index('id="leaderboard-all-time"'):]
         self.assertLess(content.index("carol"), content.index("alice"))
         self.assertLess(content.index("alice"), content.index("bob"))
         self.assertIn("<td>1</td>", self._row_for(content, "carol"))
@@ -2210,10 +2211,15 @@ class AllTimeMedalEligibilityTests(TestCase):
 
     def test_note_is_shown_on_the_all_time_board(self):
         content = self.client.get(reverse("leaderboard")).content.decode()
-        all_time = content[
-            content.index('id="leaderboard-all-time"'):content.index('id="leaderboard-monthly"')
-        ]
+        all_time = content[content.index('id="leaderboard-all-time"'):]
         self.assertIn("Minimum of 100 Counts (Predictions)", all_time)
+
+    def test_monthly_board_comes_before_all_time(self):
+        # Stacked on phones, the boards show in page order: Monthly first.
+        content = self.client.get(reverse("leaderboard")).content.decode()
+        self.assertLess(
+            content.index('id="leaderboard-monthly"'), content.index('id="leaderboard-all-time"')
+        )
 
 
 def sport_match(sport_name, team_a_name="Team A", team_b_name="Team B", **kwargs):
