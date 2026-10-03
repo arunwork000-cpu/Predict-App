@@ -28,7 +28,7 @@ from pywebpush import WebPushException
 from . import push
 from .admin import MatchAdmin, VoucherRedemptionAdmin
 from .constants import SUPPORTED_SPORTS
-from .locations import STATES_BY_COUNTRY
+from .locations import COUNTRIES, COUNTRY_CODES, STATES_BY_COUNTRY
 from .models import (
     CreditLedger,
     Match,
@@ -56,7 +56,7 @@ from .services import (
     score_match,
     sync_results,
 )
-from .templatetags.prediction_extras import signed_points, team_flag
+from .templatetags.prediction_extras import country_flag, signed_points, team_flag
 
 # A valid 1x1 transparent PNG, used as dummy upload data for flag tests.
 TINY_PNG = base64.b64decode(
@@ -633,7 +633,8 @@ class TermsAndPrivacyTests(TestCase):
     def test_register_page_shows_required_terms_checkbox(self):
         response = self.client.get(reverse("register"))
         self.assertContains(response, 'name="accept_terms"')
-        self.assertContains(response, "I am 18 or older and agree to the")
+        self.assertContains(response, "I agree to the")
+        self.assertNotContains(response, "18 or older")
 
     def test_register_without_accepting_terms_is_rejected(self):
         data = registration_data()
@@ -969,9 +970,26 @@ class PasswordChangeFlowTests(TestCase):
 
 
 class PageTests(TestCase):
-    def test_home_empty_state(self):
+    def test_sport_page_empty_state(self):
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+        self.assertContains(response, "No upcoming Football matches")
+
+    def test_home_shows_intro_not_matches_to_visitors(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, "Start Predicting")
+        # "See today's matches" in the hero and again below the disclaimer.
+        self.assertContains(response, 'href="#sports-nav"', count=2)
+        self.assertContains(response, "Disclaimer &amp; Compliance")
+        self.assertNotContains(response, "No upcoming Football matches")
+
+    def test_home_shows_matches_not_intro_to_logged_in_users(self):
+        make_user("homeuser", password="StrongPass123")
+        self.client.login(username="homeuser", password="StrongPass123")
         response = self.client.get(reverse("match_list"))
         self.assertContains(response, "No upcoming Football matches")
+        self.assertContains(response, "Disclaimer &amp; Compliance")
+        self.assertNotContains(response, "Start Predicting")
+        self.assertNotContains(response, 'href="#sports-nav"')
 
     def test_leaderboard_empty_state(self):
         response = self.client.get(reverse("leaderboard"))
@@ -981,6 +999,11 @@ class PageTests(TestCase):
         response = self.client.get(reverse("leaderboard"))
         self.assertContains(response, ">All-Time</h2>")
         self.assertContains(response, ">Monthly</h2>")
+
+    def test_leaderboard_title_above_all_time_shows_on_every_screen(self):
+        content = self.client.get(reverse("leaderboard")).content.decode()
+        all_time = content[content.index('id="leaderboard-all-time"'):]
+        self.assertIn('<h2 class="h3 mb-3">Leaderboard</h2>', all_time)
 
     def test_old_monthly_url_redirects_to_combined_leaderboard(self):
         response = self.client.get("/leaderboard/monthly/")
@@ -1142,14 +1165,83 @@ class TeamFlagModelAndTagTests(MediaIsolatedTestCase):
         self.assertIn("Lions flag", html)
 
 
+class CountryFlagTests(TestCase):
+    def test_every_supported_country_has_a_flag_file(self):
+        flags_dir = Path(__file__).resolve().parent / "static" / "predictions" / "flags"
+        for country in COUNTRIES:
+            self.assertIn(country, COUNTRY_CODES)
+            self.assertTrue((flags_dir / f"{COUNTRY_CODES[country]}.svg").is_file(), country)
+
+    def test_country_flag_tag_renders_img(self):
+        html = country_flag("India")
+        self.assertIn("predictions/flags/in.svg", html)
+        self.assertIn('class="team-flag"', html)
+        self.assertIn("India flag", html)
+
+    def test_country_flag_tag_renders_nothing_for_blank_or_unknown(self):
+        self.assertEqual(country_flag(""), "")
+        self.assertEqual(country_flag(None), "")
+        self.assertEqual(country_flag("Atlantis"), "")
+
+    def test_leaderboard_shows_flag_before_name_and_marks_country_column(self):
+        user = make_user("alice", password="pass12345")
+        Profile.objects.filter(user=user).update(country="India", points=5)
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(
+            response, 'alt="India flag" class="team-flag"><span class="d-none d-md-inline">alice</span>'
+        )
+        self.assertContains(response, '<th scope="col" class="lb-country">Country</th>')
+        self.assertContains(response, '<td class="lb-cell lb-country">India</td>')
+
+    def test_leaderboard_state_is_cut_to_seven_characters_on_mobile_only(self):
+        user = make_user("alice", password="pass12345")
+        Profile.objects.filter(user=user).update(state="Eastern Province")
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, '<span class="d-none d-md-inline">Eastern Province</span>')
+        self.assertContains(response, '<span class="d-md-none">Eastern…</span>')
+
+    def test_leaderboard_name_is_cut_to_ten_characters_on_mobile_only(self):
+        make_user("mohammedalikhan", password="pass12345")
+        make_user("shortname", password="pass12345")
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, '<span class="d-none d-md-inline">mohammedalikhan</span>')
+        self.assertContains(response, '<span class="d-md-none">mohammedal…</span>')
+        self.assertContains(response, '<span class="d-md-none">shortname</span>')
+
+
+class AddCountryReminderTests(TestCase):
+    """Players with no country (e.g. Google sign-ups) are nudged to add one."""
+
+    REMINDER = "to show your flag next to your name on the leaderboard"
+
+    def setUp(self):
+        self.user = make_user("alice", password="pass12345")
+
+    def test_shown_on_leaderboard_and_my_account_without_country(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, self.REMINDER)
+        self.assertContains(response, reverse("my_account") + "#location")
+        self.assertContains(self.client.get(reverse("my_account")), self.REMINDER)
+
+    def test_hidden_once_country_is_set(self):
+        Profile.objects.filter(user=self.user).update(country="India")
+        self.client.force_login(self.user)
+        self.assertNotContains(self.client.get(reverse("leaderboard")), self.REMINDER)
+        self.assertNotContains(self.client.get(reverse("my_account")), self.REMINDER)
+
+    def test_hidden_for_anonymous_visitors(self):
+        self.assertNotContains(self.client.get(reverse("leaderboard")), self.REMINDER)
+
+
 class TeamFlagRenderingTests(MediaIsolatedTestCase):
     """Flags belong to the team, so the same upload must show up on every
     page that mentions that team, and a flagless team must render its name
     with no broken <img>."""
 
     def setUp(self):
-        # Homepage ("/") shows only the Football sport page, so these
-        # cross-page rendering checks must use the real seeded Football sport.
+        # The Football sport page lists these matches, so these cross-page
+        # rendering checks must use the real seeded Football sport.
         self.sport = Sport.objects.get(name="Football")
         self.team_a = Team.objects.create(
             name="Lions", sport=self.sport, flag=make_flag("a.png")
@@ -1159,8 +1251,8 @@ class TeamFlagRenderingTests(MediaIsolatedTestCase):
             sport=self.sport, team_a=self.team_a, team_b=self.team_b
         )
 
-    def test_homepage_shows_flag_and_no_broken_image_for_flagless_team(self):
-        response = self.client.get(reverse("match_list"))
+    def test_sport_page_shows_flag_and_no_broken_image_for_flagless_team(self):
+        response = self.client.get(reverse("sport_matches", args=["football"]))
         content = response.content.decode()
         self.assertIn(self.team_a.flag.url, content)
         self.assertContains(response, "Tigers")
@@ -1188,7 +1280,7 @@ class TeamFlagRenderingTests(MediaIsolatedTestCase):
             team_a=self.team_a,
             team_b=Team.objects.create(name="Bears", sport=self.sport),
         )
-        response = self.client.get(reverse("match_list"))
+        response = self.client.get(reverse("sport_matches", args=["football"]))
         content = response.content.decode()
         # Each match card renders team_a's flag twice (title + pick panel);
         # team_a appears in two open matches here.
@@ -1523,14 +1615,13 @@ class MatchDetailViewTests(TestCase):
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
     def test_match_list_links_to_detail_page(self):
-        # The homepage only shows Football matches, so this one must be Football.
         football = Sport.objects.get(name="Football")
         match = future_match(
             sport=football,
             team_a=Team.objects.create(name="A linked", sport=football),
             team_b=Team.objects.create(name="B linked", sport=football),
         )
-        response = self.client.get(reverse("match_list"))
+        response = self.client.get(reverse("sport_matches", args=["football"]))
         self.assertContains(response, reverse("match_detail", args=[match.pk]))
 
 
@@ -1549,7 +1640,13 @@ class LeaderboardViewTests(TestCase):
         marker = f'id="leaderboard-{section}"'
         content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
-        at = body.index(f'<td class="lb-cell">{username}</td>')
+        # The name may be preceded by its country flag <img>; the full name
+        # sits in the desktop span.
+        at = re.search(
+            rf'<td class="lb-cell">(?:<img[^>]*>)?'
+            rf'<span class="d-none d-md-inline">{re.escape(username)}</span>',
+            body,
+        ).start()
         start = body.rindex("<tr", 0, at)
         stop = body.index("</tr>", at)
         return body[start:stop]
@@ -2010,6 +2107,43 @@ class PastMonthMedalEligibilityTests(TestCase):
         self.assertContains(response, "No winners recorded for this month.")
 
 
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 3)
+class CurrentMonthMedalEligibilityTests(TestCase):
+    """The current month's medals need MEDAL_MIN_PREDICTIONS predictions on
+    every day of the month (there is no longer a day-of-month rule)."""
+
+    def setUp(self):
+        self.when = PastMonthLeaderboardTests._start_of_this_month() + timedelta(hours=1)
+
+    def _player(self, username, points, predictions):
+        user = make_user(username, password="pass12345")
+        ScoreAdjustment.objects.create(
+            user=user, match=match_kicking_off(self.when), delta=points
+        )
+        for _ in range(predictions):
+            Prediction.objects.create(
+                user=user, match=match_kicking_off(self.when), choice="A"
+            )
+
+    def test_player_below_minimum_gets_no_medal_and_next_moves_up(self):
+        self._player("casual", 90, 1)
+        self._player("first", 50, 3)
+        self._player("second", 40, 5)
+        self._player("third", 30, 3)
+        self._player("fourth", 20, 4)
+
+        response = self.client.get(reverse("leaderboard"))
+        medals = {
+            p.user.username: p.medal for p in response.context["monthly_profiles"]
+        }
+
+        self.assertIsNone(medals["casual"])
+        self.assertEqual(medals["first"], "gold")
+        self.assertEqual(medals["second"], "silver")
+        self.assertEqual(medals["third"], "bronze")
+        self.assertIsNone(medals["fourth"])
+
+
 class UserPredictionCountAdminTests(TestCase):
     """Admin User Counts page counts this month's predictions by kickoff."""
 
@@ -2054,14 +2188,12 @@ class VoucherAnnouncementTests(TestCase):
         self.assertNotContains(response, "Gift vouchers are expected to be issued")
 
 
-@mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
 @mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
 class LeaderboardMedalTests(TestCase):
     """Gold/silver/bronze medal images next to the top three rows only.
 
-    The prediction-count medal floor is switched off on both boards (start
-    day 32 never comes, minimum 0), so these rank-only tests pass on any day
-    of the month.
+    The prediction-count medal floor is switched off on both boards
+    (minimum 0), so these tests cover ranking only.
     """
 
     @staticmethod
@@ -2069,7 +2201,13 @@ class LeaderboardMedalTests(TestCase):
         marker = f'id="leaderboard-{section}"'
         content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
-        at = body.index(f'<td class="lb-cell">{username}</td>')
+        # The name may be preceded by its country flag <img>; the full name
+        # sits in the desktop span.
+        at = re.search(
+            rf'<td class="lb-cell">(?:<img[^>]*>)?'
+            rf'<span class="d-none d-md-inline">{re.escape(username)}</span>',
+            body,
+        ).start()
         start = body.rindex("<tr", 0, at)
         stop = body.index("</tr>", at)
         return body[start:stop]
@@ -2161,7 +2299,6 @@ class LeaderboardMedalTests(TestCase):
 
 # Start day 32 never comes: the Monthly floor is off, so these tests also
 # prove the All-Time floor applies whatever the day of the month.
-@mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
 class AllTimeMedalEligibilityTests(TestCase):
     """All-Time medals go to the top 3 among players with at least
     MEDAL_MIN_PREDICTIONS predictions, on every day of the month."""

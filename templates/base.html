@@ -214,6 +214,38 @@
       transform: translateY(-50%);
       margin-left: 0;
     }
+    /* Phones and the installed app: drop the Country column so the table
+       fits (the flag before each player name still shows the country), cap
+       Player at 10 and State at 7 characters (done in the template) and let
+       Player take whatever width is left. */
+    @media (max-width: 767.98px) {
+      .leaderboard-table {
+        font-size: .875rem;
+      }
+      .leaderboard-table .lb-country {
+        display: none;
+      }
+      .leaderboard-table th:first-child,
+      .leaderboard-table td:first-child {
+        width: 2.5rem;
+      }
+      .leaderboard-table th:nth-child(2),
+      .leaderboard-table td:nth-child(2) {
+        width: auto;
+      }
+      .leaderboard-table th:nth-child(3),
+      .leaderboard-table td:nth-child(3) {
+        width: 4.25rem;
+      }
+      .leaderboard-table th:nth-child(5),
+      .leaderboard-table td:nth-child(5) {
+        width: 3.25rem;
+      }
+      .leaderboard-table th:last-child,
+      .leaderboard-table td:last-child {
+        width: 4.5rem;
+      }
+    }
     @media (max-width: 575.98px) {
       .medal-icon {
         width: 24px;
@@ -276,12 +308,13 @@
       }
     }
   </style>
+  {% block extra_head %}{% endblock %}
 </head>
 <body class="bg-light">
   <nav class="navbar navbar-expand navbar-dark navbar-brand-green mb-4">
     <div class="container flex-column flex-lg-row align-items-stretch align-items-lg-center">
       {# Sports and main pages share one list so phones wrap it at full size. #}
-      <ul class="navbar-nav flex-wrap me-lg-auto">
+      <ul class="navbar-nav flex-wrap me-lg-auto" id="sports-nav">
         {% for sport in nav_sports %}
           <li class="nav-item">
             <a class="nav-link lh-sm {% if sport.slug == sport_slug %}active{% endif %}"
@@ -372,7 +405,11 @@
     <a class="link-secondary" href="{% url 'terms' %}">Terms and Conditions</a>
     <span class="mx-1">·</span>
     <a class="link-secondary" href="{% url 'privacy' %}">Privacy Policy</a>
-    <div>Free-to-play · No real-money betting</div>
+    <p class="mt-2 mb-0 mx-auto" style="max-width: 46rem;">
+      Winsports.cc is a 100% Free-to-Play sports prediction platform. No real money betting or wagering is permitted.
+      Users must be 18+. Prize distribution is subject to terms and state-specific exclusions as mentioned in
+      <a class="link-secondary" href="{% url 'terms' %}">T&amp;C</a>.
+    </p>
   </footer>
 
   <div class="pwa-banner" id="pwa-banner" hidden>

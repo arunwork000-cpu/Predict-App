@@ -18,7 +18,7 @@
         <div class="mb-3 form-check">
           <input type="checkbox" class="form-check-input" name="{{ field.html_name }}" id="{{ field.id_for_label }}" required{% if field.value %} checked{% endif %}>
           <label class="form-check-label" for="{{ field.id_for_label }}">
-            I am 18 or older and agree to the
+            I agree to the
             <a href="{% url 'terms' %}" target="_blank" rel="noopener">Terms and Conditions</a>
             and <a href="{% url 'privacy' %}" target="_blank" rel="noopener">Privacy Policy</a>
             <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden">(required)</span>

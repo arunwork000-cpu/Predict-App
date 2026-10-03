@@ -1,6 +1,6 @@
 {% comment %}
 "Continue with Google" button. Include with show_terms=True on the Register
-page: a new account needs the Terms / 18+ checkbox ticked (enforced again in
+page: a new account needs the Terms checkbox ticked (enforced again in
 views._google_login). Expects `next` and `ref` in the context (either may be
 empty).
 {% endcomment %}
@@ -13,7 +13,7 @@ empty).
   <div class="mb-3 form-check">
     <input type="checkbox" class="form-check-input" name="accept_terms" id="google_accept_terms" required>
     <label class="form-check-label" for="google_accept_terms">
-      I am 18 or older and agree to the
+      I agree to the
       <a href="{% url 'terms' %}" target="_blank" rel="noopener">Terms and Conditions</a>
       and <a href="{% url 'privacy' %}" target="_blank" rel="noopener">Privacy Policy</a>
       <span class="text-danger" aria-hidden="true">*</span><span class="visually-hidden">(required)</span>

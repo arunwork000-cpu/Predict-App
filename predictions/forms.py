@@ -52,7 +52,7 @@ class RegistrationForm(UserCreationForm):
     # Not stored: a successful registration implies acceptance. The label
     # (with links to both pages) is rendered in register.html.
     accept_terms = forms.BooleanField(
-        label="I am 18 or older and agree to the Terms and Conditions and Privacy Policy",
+        label="I agree to the Terms and Conditions and Privacy Policy",
         error_messages={
             "required": "You must accept the Terms and Conditions to register."
         },

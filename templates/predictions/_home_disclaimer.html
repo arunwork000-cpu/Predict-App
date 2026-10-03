@@ -1,0 +1,24 @@
+{# Homepage disclaimer, shown to everyone on `/` below the match list. #}
+<section class="card card-body home-disclaimer mt-4" aria-labelledby="home-disclaimer-heading">
+  <h2 id="home-disclaimer-heading" class="h6 fw-bold mb-2">Disclaimer &amp; Compliance</h2>
+  <p class="mb-2">
+    WinSports (winsports.cc) is a Free-to-Play (F2P) fan-engagement and sports-prediction platform intended
+    strictly for entertainment purposes. We do not host, permit, or facilitate real-money gambling, betting,
+    or wagering of any kind. No financial deposits or entry fees are required to participate or to be eligible
+    for prizes.
+  </p>
+  <p class="mb-2">
+    Users must be 18 years or older to participate. Due to applicable state-specific regulations, residents of
+    Andhra Pradesh, Telangana, Assam, Nagaland, Sikkim, and Odisha may participate but are not eligible to
+    receive leaderboard prizes.
+  </p>
+  <p class="mb-0">
+    Please read our full <a href="{% url 'terms' %}">Terms &amp; Conditions</a> and
+    <a href="{% url 'privacy' %}">Privacy Policy</a> before participating.
+  </p>
+  {% if not user.is_authenticated %}
+    <p class="mt-3 mb-0">
+      <a class="home-disclaimer-link" href="#sports-nav">See today's matches <span class="home-arrow" aria-hidden="true">→</span></a>
+    </p>
+  {% endif %}
+</section>

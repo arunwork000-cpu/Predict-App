@@ -31,9 +31,14 @@
   </div>
 </div>
 
-<div class="card mb-4">
+<div class="card mb-4" id="location">
   <div class="card-body">
     <h2 class="h5">Your location <span class="fs-6 fw-normal text-muted">(optional)</span></h2>
+    {% if not profile.country %}
+      <div class="alert alert-info small" role="status">
+        Add your country to show your flag next to your name on the leaderboard.
+      </div>
+    {% endif %}
     <p class="text-muted">Shown next to your name on the leaderboard. Leave blank to show nothing.</p>
     <form method="post" action="{% url 'my_account' %}">
       {% csrf_token %}
