@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block title %}Leaderboard{% endblock %}
 {% block content %}
+{% if user.is_authenticated and not user.profile.country %}
+  <div class="alert alert-info small" role="status">
+    Add your country in <a href="{% url 'my_account' %}#location" class="alert-link">My Account</a>
+    to show your flag next to your name on the leaderboard.
+  </div>
+{% endif %}
 <div class="row g-4">
   <section class="col-12 col-lg-6" id="leaderboard-monthly" aria-labelledby="lb-monthly-heading">
     <h1 class="h3 mb-3">Leaderboard</h1>

@@ -1187,6 +1187,31 @@ class CountryFlagTests(TestCase):
         self.assertContains(response, '<span class="d-md-none">shortname</span>')
 
 
+class AddCountryReminderTests(TestCase):
+    """Players with no country (e.g. Google sign-ups) are nudged to add one."""
+
+    REMINDER = "to show your flag next to your name on the leaderboard"
+
+    def setUp(self):
+        self.user = make_user("alice", password="pass12345")
+
+    def test_shown_on_leaderboard_and_my_account_without_country(self):
+        self.client.force_login(self.user)
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, self.REMINDER)
+        self.assertContains(response, reverse("my_account") + "#location")
+        self.assertContains(self.client.get(reverse("my_account")), self.REMINDER)
+
+    def test_hidden_once_country_is_set(self):
+        Profile.objects.filter(user=self.user).update(country="India")
+        self.client.force_login(self.user)
+        self.assertNotContains(self.client.get(reverse("leaderboard")), self.REMINDER)
+        self.assertNotContains(self.client.get(reverse("my_account")), self.REMINDER)
+
+    def test_hidden_for_anonymous_visitors(self):
+        self.assertNotContains(self.client.get(reverse("leaderboard")), self.REMINDER)
+
+
 class TeamFlagRenderingTests(MediaIsolatedTestCase):
     """Flags belong to the team, so the same upload must show up on every
     page that mentions that team, and a flagless team must render its name
