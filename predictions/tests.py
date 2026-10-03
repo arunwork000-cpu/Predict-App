@@ -633,7 +633,8 @@ class TermsAndPrivacyTests(TestCase):
     def test_register_page_shows_required_terms_checkbox(self):
         response = self.client.get(reverse("register"))
         self.assertContains(response, 'name="accept_terms"')
-        self.assertContains(response, "I am 18 or older and agree to the")
+        self.assertContains(response, "I agree to the")
+        self.assertNotContains(response, "18 or older")
 
     def test_register_without_accepting_terms_is_rejected(self):
         data = registration_data()
