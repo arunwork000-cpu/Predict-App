@@ -386,7 +386,6 @@ def _monthly_profiles(year, month):
     return profiles
 
 
-MEDAL_ELIGIBILITY_START_DAY = 21  # day-of-month the 100-prediction floor kicks in
 MEDAL_MIN_PREDICTIONS = 100
 MEDAL_ELIGIBILITY_FIRST_MONTH = (2026, 9)  # past months before this keep rank-only winners
 _MEDALS = ("gold", "silver", "bronze")
@@ -427,7 +426,7 @@ def leaderboard(request):
     is_past_month = selected != current
     zone = timezone.get_default_timezone()
 
-    # All-Time medals always need the prediction floor; no day-of-month rule.
+    # Medals on both boards always need the prediction floor.
     all_time_profiles = list(_all_time_profiles())
     _assign_medals_by_eligibility(
         all_time_profiles, MEDAL_MIN_PREDICTIONS, count_attr="predictions_count"
@@ -435,9 +434,9 @@ def leaderboard(request):
 
     monthly_profiles = _monthly_profiles(*selected)
     if is_past_month:
-        # Only the winners: a zero-point player isn't one. A finished month
-        # is past the eligibility day, so the prediction floor applies (from
-        # the month the rule was introduced; earlier months stay rank-based).
+        # Only the winners: a zero-point player isn't one. The prediction
+        # floor applies from the month the rule was introduced; earlier
+        # months stay rank-based.
         winners = [p for p in monthly_profiles if p.monthly_points > 0]
         if selected >= MEDAL_ELIGIBILITY_FIRST_MONTH:
             winners = [
@@ -447,11 +446,7 @@ def leaderboard(request):
         monthly_profiles = winners[:3]
         _assign_medals_by_rank(monthly_profiles)
     else:
-        today = timezone.localtime(timezone.now(), zone).day
-        if today >= MEDAL_ELIGIBILITY_START_DAY:
-            _assign_medals_by_eligibility(monthly_profiles, MEDAL_MIN_PREDICTIONS)
-        else:
-            _assign_medals_by_rank(monthly_profiles)
+        _assign_medals_by_eligibility(monthly_profiles, MEDAL_MIN_PREDICTIONS)
 
     months_with_activity = {
         (m.year, m.month)

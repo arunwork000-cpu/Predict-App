@@ -38,8 +38,7 @@
     {% include "predictions/_leaderboard_table.html" with profiles=monthly_profiles is_monthly=True is_past_month=is_past_month %}
   </section>
   <section class="col-12 col-lg-6" id="leaderboard-all-time" aria-labelledby="lb-all-time-heading">
-    {# Repeated title only when the boards sit side by side; stacked, the one above Monthly covers both. #}
-    <h2 class="h3 mb-3 d-none d-lg-block">Leaderboard</h2>
+    <h2 class="h3 mb-3">Leaderboard</h2>
     <h2 class="h5 mb-2" id="lb-all-time-heading">All-Time</h2>
     <p class="small text-muted mb-2">Minimum of 100 Counts (Predictions) required along with the higher points to be eligible for Medals</p>
     {% include "predictions/_leaderboard_table.html" with profiles=all_time_profiles is_monthly=False %}

@@ -983,6 +983,11 @@ class PageTests(TestCase):
         self.assertContains(response, ">All-Time</h2>")
         self.assertContains(response, ">Monthly</h2>")
 
+    def test_leaderboard_title_above_all_time_shows_on_every_screen(self):
+        content = self.client.get(reverse("leaderboard")).content.decode()
+        all_time = content[content.index('id="leaderboard-all-time"'):]
+        self.assertIn('<h2 class="h3 mb-3">Leaderboard</h2>', all_time)
+
     def test_old_monthly_url_redirects_to_combined_leaderboard(self):
         response = self.client.get("/leaderboard/monthly/")
         self.assertRedirects(
@@ -2086,6 +2091,43 @@ class PastMonthMedalEligibilityTests(TestCase):
         self.assertContains(response, "No winners recorded for this month.")
 
 
+@mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 3)
+class CurrentMonthMedalEligibilityTests(TestCase):
+    """The current month's medals need MEDAL_MIN_PREDICTIONS predictions on
+    every day of the month (there is no longer a day-of-month rule)."""
+
+    def setUp(self):
+        self.when = PastMonthLeaderboardTests._start_of_this_month() + timedelta(hours=1)
+
+    def _player(self, username, points, predictions):
+        user = make_user(username, password="pass12345")
+        ScoreAdjustment.objects.create(
+            user=user, match=match_kicking_off(self.when), delta=points
+        )
+        for _ in range(predictions):
+            Prediction.objects.create(
+                user=user, match=match_kicking_off(self.when), choice="A"
+            )
+
+    def test_player_below_minimum_gets_no_medal_and_next_moves_up(self):
+        self._player("casual", 90, 1)
+        self._player("first", 50, 3)
+        self._player("second", 40, 5)
+        self._player("third", 30, 3)
+        self._player("fourth", 20, 4)
+
+        response = self.client.get(reverse("leaderboard"))
+        medals = {
+            p.user.username: p.medal for p in response.context["monthly_profiles"]
+        }
+
+        self.assertIsNone(medals["casual"])
+        self.assertEqual(medals["first"], "gold")
+        self.assertEqual(medals["second"], "silver")
+        self.assertEqual(medals["third"], "bronze")
+        self.assertIsNone(medals["fourth"])
+
+
 class UserPredictionCountAdminTests(TestCase):
     """Admin User Counts page counts this month's predictions by kickoff."""
 
@@ -2130,14 +2172,12 @@ class VoucherAnnouncementTests(TestCase):
         self.assertNotContains(response, "Gift vouchers are expected to be issued")
 
 
-@mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
 @mock.patch("predictions.views.MEDAL_MIN_PREDICTIONS", 0)
 class LeaderboardMedalTests(TestCase):
     """Gold/silver/bronze medal images next to the top three rows only.
 
-    The prediction-count medal floor is switched off on both boards (start
-    day 32 never comes, minimum 0), so these rank-only tests pass on any day
-    of the month.
+    The prediction-count medal floor is switched off on both boards
+    (minimum 0), so these tests cover ranking only.
     """
 
     @staticmethod
@@ -2243,7 +2283,6 @@ class LeaderboardMedalTests(TestCase):
 
 # Start day 32 never comes: the Monthly floor is off, so these tests also
 # prove the All-Time floor applies whatever the day of the month.
-@mock.patch("predictions.views.MEDAL_ELIGIBILITY_START_DAY", 32)
 class AllTimeMedalEligibilityTests(TestCase):
     """All-Time medals go to the top 3 among players with at least
     MEDAL_MIN_PREDICTIONS predictions, on every day of the month."""
