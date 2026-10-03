@@ -970,9 +970,26 @@ class PasswordChangeFlowTests(TestCase):
 
 
 class PageTests(TestCase):
-    def test_home_empty_state(self):
+    def test_sport_page_empty_state(self):
+        response = self.client.get(reverse("sport_matches", args=["football"]))
+        self.assertContains(response, "No upcoming Football matches")
+
+    def test_home_shows_intro_not_matches_to_visitors(self):
+        response = self.client.get(reverse("match_list"))
+        self.assertContains(response, "Start Predicting")
+        # "See today's matches" in the hero and again below the disclaimer.
+        self.assertContains(response, 'href="#sports-nav"', count=2)
+        self.assertContains(response, "Disclaimer &amp; Compliance")
+        self.assertNotContains(response, "No upcoming Football matches")
+
+    def test_home_shows_matches_not_intro_to_logged_in_users(self):
+        make_user("homeuser", password="StrongPass123")
+        self.client.login(username="homeuser", password="StrongPass123")
         response = self.client.get(reverse("match_list"))
         self.assertContains(response, "No upcoming Football matches")
+        self.assertContains(response, "Disclaimer &amp; Compliance")
+        self.assertNotContains(response, "Start Predicting")
+        self.assertNotContains(response, 'href="#sports-nav"')
 
     def test_leaderboard_empty_state(self):
         response = self.client.get(reverse("leaderboard"))
@@ -1223,8 +1240,8 @@ class TeamFlagRenderingTests(MediaIsolatedTestCase):
     with no broken <img>."""
 
     def setUp(self):
-        # Homepage ("/") shows only the Football sport page, so these
-        # cross-page rendering checks must use the real seeded Football sport.
+        # The Football sport page lists these matches, so these cross-page
+        # rendering checks must use the real seeded Football sport.
         self.sport = Sport.objects.get(name="Football")
         self.team_a = Team.objects.create(
             name="Lions", sport=self.sport, flag=make_flag("a.png")
@@ -1234,8 +1251,8 @@ class TeamFlagRenderingTests(MediaIsolatedTestCase):
             sport=self.sport, team_a=self.team_a, team_b=self.team_b
         )
 
-    def test_homepage_shows_flag_and_no_broken_image_for_flagless_team(self):
-        response = self.client.get(reverse("match_list"))
+    def test_sport_page_shows_flag_and_no_broken_image_for_flagless_team(self):
+        response = self.client.get(reverse("sport_matches", args=["football"]))
         content = response.content.decode()
         self.assertIn(self.team_a.flag.url, content)
         self.assertContains(response, "Tigers")
@@ -1263,7 +1280,7 @@ class TeamFlagRenderingTests(MediaIsolatedTestCase):
             team_a=self.team_a,
             team_b=Team.objects.create(name="Bears", sport=self.sport),
         )
-        response = self.client.get(reverse("match_list"))
+        response = self.client.get(reverse("sport_matches", args=["football"]))
         content = response.content.decode()
         # Each match card renders team_a's flag twice (title + pick panel);
         # team_a appears in two open matches here.
@@ -1598,14 +1615,13 @@ class MatchDetailViewTests(TestCase):
         self.assertNotContains(response, reverse("predict", args=[match.pk]))
 
     def test_match_list_links_to_detail_page(self):
-        # The homepage only shows Football matches, so this one must be Football.
         football = Sport.objects.get(name="Football")
         match = future_match(
             sport=football,
             team_a=Team.objects.create(name="A linked", sport=football),
             team_b=Team.objects.create(name="B linked", sport=football),
         )
-        response = self.client.get(reverse("match_list"))
+        response = self.client.get(reverse("sport_matches", args=["football"]))
         self.assertContains(response, reverse("match_detail", args=[match.pk]))
 
 

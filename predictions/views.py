@@ -65,11 +65,12 @@ def _sport_redirect(sport):
 
 
 def home(request):
-    """The generic homepage: it simply shows the default sport (Football)."""
-    return sport_matches(request, DEFAULT_SPORT_SLUG)
+    """The generic homepage: the default sport (Football) plus the visitor
+    intro and disclaimer that only `/` shows."""
+    return sport_matches(request, DEFAULT_SPORT_SLUG, extra_context={"is_home": True})
 
 
-def sport_matches(request, sport_slug):
+def sport_matches(request, sport_slug, extra_context=None):
     """Public page for one sport: only its published, currently-open matches."""
     sport_name = SPORT_SLUGS.get(sport_slug)
     if sport_name is None:
@@ -104,6 +105,7 @@ def sport_matches(request, sport_slug):
             "sport_slug": sport_slug,
             "open_matches": open_matches,
             "draw_sports": DRAW_SPORTS,
+            **(extra_context or {}),
         },
     )
 

@@ -1,0 +1,77 @@
+{# Visitor intro on the homepage: shown to logged-out visitors only. #}
+<section class="home-hero mb-4 home-animate" aria-labelledby="home-hero-heading">
+  {# The last word and the trophy are glued together so the trophy never wraps onto its own line. #}
+  <h1 id="home-hero-heading" class="mb-3">
+    Predict Sports. Climb the Leaderboard. Win <span class="text-nowrap">Prizes!&nbsp;<span aria-hidden="true">🏆</span></span>
+  </h1>
+  <p class="home-lead mb-4">
+    Welcome to India’s ultimate sports prediction arena. Put your sports knowledge to the test,
+    compete with fans across the country, climb the monthly leaderboard, and earn exciting gift vouchers.
+  </p>
+  <ul class="home-badges" aria-label="Platform highlights">
+    <li><span class="home-badge-icon" aria-hidden="true">✓</span> 100% Free-to-Play</li>
+    <li><span class="home-badge-icon" aria-hidden="true">🚫</span> No Betting</li>
+    <li><span class="home-badge-icon" aria-hidden="true">🛡️</span> No Real Money Required</li>
+  </ul>
+  <p class="home-pitch mb-1">Compete every day. Earn points. Climb the leaderboard.</p>
+  <p class="home-pitch-sub mb-4">Top 3 eligible players win monthly gift vouchers.</p>
+  <div class="home-ctas">
+    <a class="btn btn-lg home-cta" href="{% url 'register' %}">Start Predicting — It's Free</a>
+    <a class="home-secondary-link" href="#sports-nav">See today's matches <span class="home-arrow" aria-hidden="true">→</span></a>
+  </div>
+</section>
+
+<section class="mb-4" aria-labelledby="home-how-heading">
+  <h2 id="home-how-heading" class="h4 mb-3 home-section-title">How It Works</h2>
+  <div class="row g-3">
+    <div class="col-md-4">
+      <div class="card card-body h-100 home-step home-animate home-delay-1">
+        <div class="d-flex align-items-center gap-3 mb-2">
+          <span class="home-step-icon" aria-hidden="true">🧠</span>
+          <div>
+            <div class="home-step-num">Step 1</div>
+            <h3 class="h5 mb-0">Predict for Free</h3>
+          </div>
+        </div>
+        <p class="mb-1">Make predictions on daily matches using your sports knowledge.</p>
+        <p class="mb-0 text-muted small">There are no entry fees and no financial deposits.</p>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card card-body h-100 home-step home-animate home-delay-2">
+        <div class="d-flex align-items-center gap-3 mb-2">
+          <span class="home-step-icon" aria-hidden="true">📈</span>
+          <div>
+            <div class="home-step-num">Step 2</div>
+            <h3 class="h5 mb-0">Earn Points</h3>
+          </div>
+        </div>
+        <p class="mb-0">Make accurate predictions to earn points and climb the monthly leaderboard.</p>
+      </div>
+    </div>
+    <div class="col-md-4">
+      <div class="card card-body h-100 home-step home-animate home-delay-3">
+        <div class="d-flex align-items-center gap-3 mb-2">
+          <span class="home-step-icon" aria-hidden="true">🎁</span>
+          <div>
+            <div class="home-step-num">Step 3</div>
+            <h3 class="h5 mb-0">Win Vouchers</h3>
+          </div>
+        </div>
+        <p class="mb-1">At the end of each month, the top 3 eligible predictors on the leaderboard receive gift vouchers.</p>
+        <p class="mb-0 text-muted small">
+          Eligibility rules apply — see the <a href="{% url 'leaderboard' %}">Leaderboard</a>
+          and <a href="{% url 'terms' %}">Terms</a>.
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="home-f2p p-4 mb-4 home-animate home-delay-3" aria-labelledby="home-f2p-heading">
+  <h2 id="home-f2p-heading" class="h4 mb-2 home-section-title">100% Free-to-Play</h2>
+  <p class="mb-2">
+    Test your sports knowledge, compete on the leaderboard, and enjoy the game without paying an entry fee.
+  </p>
+  <p class="mb-0 home-f2p-tagline">No deposits. No betting. No wagering. Just sports predictions.</p>
+</section>
