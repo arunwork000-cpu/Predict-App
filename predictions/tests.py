@@ -28,7 +28,7 @@ from pywebpush import WebPushException
 from . import push
 from .admin import MatchAdmin, VoucherRedemptionAdmin
 from .constants import SUPPORTED_SPORTS
-from .locations import STATES_BY_COUNTRY
+from .locations import COUNTRIES, COUNTRY_CODES, STATES_BY_COUNTRY
 from .models import (
     CreditLedger,
     Match,
@@ -56,7 +56,7 @@ from .services import (
     score_match,
     sync_results,
 )
-from .templatetags.prediction_extras import signed_points, team_flag
+from .templatetags.prediction_extras import country_flag, signed_points, team_flag
 
 # A valid 1x1 transparent PNG, used as dummy upload data for flag tests.
 TINY_PNG = base64.b64decode(
@@ -1143,6 +1143,50 @@ class TeamFlagModelAndTagTests(MediaIsolatedTestCase):
         self.assertIn("Lions flag", html)
 
 
+class CountryFlagTests(TestCase):
+    def test_every_supported_country_has_a_flag_file(self):
+        flags_dir = Path(__file__).resolve().parent / "static" / "predictions" / "flags"
+        for country in COUNTRIES:
+            self.assertIn(country, COUNTRY_CODES)
+            self.assertTrue((flags_dir / f"{COUNTRY_CODES[country]}.svg").is_file(), country)
+
+    def test_country_flag_tag_renders_img(self):
+        html = country_flag("India")
+        self.assertIn("predictions/flags/in.svg", html)
+        self.assertIn('class="team-flag"', html)
+        self.assertIn("India flag", html)
+
+    def test_country_flag_tag_renders_nothing_for_blank_or_unknown(self):
+        self.assertEqual(country_flag(""), "")
+        self.assertEqual(country_flag(None), "")
+        self.assertEqual(country_flag("Atlantis"), "")
+
+    def test_leaderboard_shows_flag_before_name_and_marks_country_column(self):
+        user = make_user("alice", password="pass12345")
+        Profile.objects.filter(user=user).update(country="India", points=5)
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(
+            response, 'alt="India flag" class="team-flag"><span class="d-none d-md-inline">alice</span>'
+        )
+        self.assertContains(response, '<th scope="col" class="lb-country">Country</th>')
+        self.assertContains(response, '<td class="lb-cell lb-country">India</td>')
+
+    def test_leaderboard_state_is_cut_to_seven_characters_on_mobile_only(self):
+        user = make_user("alice", password="pass12345")
+        Profile.objects.filter(user=user).update(state="Eastern Province")
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, '<span class="d-none d-md-inline">Eastern Province</span>')
+        self.assertContains(response, '<span class="d-md-none">Eastern…</span>')
+
+    def test_leaderboard_name_is_cut_to_ten_characters_on_mobile_only(self):
+        make_user("mohammedalikhan", password="pass12345")
+        make_user("shortname", password="pass12345")
+        response = self.client.get(reverse("leaderboard"))
+        self.assertContains(response, '<span class="d-none d-md-inline">mohammedalikhan</span>')
+        self.assertContains(response, '<span class="d-md-none">mohammedal…</span>')
+        self.assertContains(response, '<span class="d-md-none">shortname</span>')
+
+
 class TeamFlagRenderingTests(MediaIsolatedTestCase):
     """Flags belong to the team, so the same upload must show up on every
     page that mentions that team, and a flagless team must render its name
@@ -1550,7 +1594,13 @@ class LeaderboardViewTests(TestCase):
         marker = f'id="leaderboard-{section}"'
         content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
-        at = body.index(f'<td class="lb-cell">{username}</td>')
+        # The name may be preceded by its country flag <img>; the full name
+        # sits in the desktop span.
+        at = re.search(
+            rf'<td class="lb-cell">(?:<img[^>]*>)?'
+            rf'<span class="d-none d-md-inline">{re.escape(username)}</span>',
+            body,
+        ).start()
         start = body.rindex("<tr", 0, at)
         stop = body.index("</tr>", at)
         return body[start:stop]
@@ -2070,7 +2120,13 @@ class LeaderboardMedalTests(TestCase):
         marker = f'id="leaderboard-{section}"'
         content = content[content.index(marker):]
         body = content[content.index("<tbody>"):content.index("</tbody>")]
-        at = body.index(f'<td class="lb-cell">{username}</td>')
+        # The name may be preceded by its country flag <img>; the full name
+        # sits in the desktop span.
+        at = re.search(
+            rf'<td class="lb-cell">(?:<img[^>]*>)?'
+            rf'<span class="d-none d-md-inline">{re.escape(username)}</span>',
+            body,
+        ).start()
         start = body.rindex("<tr", 0, at)
         stop = body.index("</tr>", at)
         return body[start:stop]

@@ -166,6 +166,20 @@ STATES_BY_COUNTRY = {
 COUNTRIES = list(STATES_BY_COUNTRY.keys())
 COUNTRY_CHOICES = [(name, name) for name in COUNTRIES]
 
+# ISO 3166 alpha-2 code per country, naming its flag SVG in
+# static/predictions/flags/ (shown before player names on the leaderboard).
+COUNTRY_CODES = {
+    "India": "in",
+    "Bahrain": "bh",
+    "Kuwait": "kw",
+    "Oman": "om",
+    "Qatar": "qa",
+    "Saudi Arabia": "sa",
+    "United Arab Emirates (UAE)": "ae",
+    "United Kingdom (UK)": "gb",
+    "United States (USA)": "us",
+}
+
 # Every state across every country, for the state field's ChoiceField.choices
 # (which must accept whichever state a valid POST names, whatever the
 # selected country). The cross-field check that the state actually belongs

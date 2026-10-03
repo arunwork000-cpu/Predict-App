@@ -214,6 +214,38 @@
       transform: translateY(-50%);
       margin-left: 0;
     }
+    /* Phones and the installed app: drop the Country column so the table
+       fits (the flag before each player name still shows the country), cap
+       Player at 10 and State at 7 characters (done in the template) and let
+       Player take whatever width is left. */
+    @media (max-width: 767.98px) {
+      .leaderboard-table {
+        font-size: .875rem;
+      }
+      .leaderboard-table .lb-country {
+        display: none;
+      }
+      .leaderboard-table th:first-child,
+      .leaderboard-table td:first-child {
+        width: 2.5rem;
+      }
+      .leaderboard-table th:nth-child(2),
+      .leaderboard-table td:nth-child(2) {
+        width: auto;
+      }
+      .leaderboard-table th:nth-child(3),
+      .leaderboard-table td:nth-child(3) {
+        width: 4.25rem;
+      }
+      .leaderboard-table th:nth-child(5),
+      .leaderboard-table td:nth-child(5) {
+        width: 3.25rem;
+      }
+      .leaderboard-table th:last-child,
+      .leaderboard-table td:last-child {
+        width: 4.5rem;
+      }
+    }
     @media (max-width: 575.98px) {
       .medal-icon {
         width: 24px;
